@@ -36,7 +36,7 @@ namespace sample_util {
 // returns sizeof(arr)
 // use instead of sizeof() to avoid unintended array-to-pointer decay
 template <typename T, int N>
-static constexpr std::size_t sizeof_arr(const T(&arr)[N]) {
+static constexpr std::size_t sizeof_arr(const T (&arr)[N]) {
   return sizeof(arr);
 }
 

@@ -53,5 +53,4 @@ class GlfwCoreVideo {
 };
 }  // namespace mujoco
 
-
 #endif  // MUJOCO_SIMULATE_GLFW_COREVIDEO_H_

@@ -1,21 +1,55 @@
 #include <chrono>
-#include <memory>
-#include <thread>
-
 #include <controller_manager/controller_manager.hpp>
+#include <memory>
 #include <rclcpp/executors.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <realtime_tools/realtime_helpers.hpp>
+#include <thread>
+
+#include "mujoco_ros2_bridge/mujoco_context.hpp"
+#include "mujoco_ros2_bridge/mujoco_ros_bridge.hpp"
 
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
 
+  auto simulation = std::make_shared<mujoco_simulation::MuJoCoSimulation>();
+  mujoco_ros2_bridge::MujocoContext::set_simulation(simulation);
+
   auto executor = std::make_shared<rclcpp::executors::MultiThreadedExecutor>();
   auto controller_manager = std::make_shared<controller_manager::ControllerManager>(
     executor, "controller_manager", "");
 
+  auto bridge_node = std::make_shared<rclcpp::Node>("mujoco_ros2_bridge");
+  auto bridge = std::make_shared<mujoco_ros2_bridge::MujocoRosBridge>(bridge_node, simulation);
+
+  const auto hardware_info = mujoco_ros2_bridge::MujocoContext::hardware_info();
+  if (!hardware_info.has_value()) {
+    RCLCPP_ERROR(bridge_node->get_logger(), "HardwareInfo is not available from MujocoContext.");
+    rclcpp::shutdown();
+    return 1;
+  }
+
+  mujoco_ros2_bridge::BridgeConfig bridge_config;
+  const auto publish_clock_it = hardware_info->hardware_parameters.find("publish_clock");
+  if (publish_clock_it != hardware_info->hardware_parameters.end()) {
+    bridge_config.publish_clock = publish_clock_it->second != "false";
+  }
+  const auto service_it = hardware_info->hardware_parameters.find("enable_sim_services");
+  if (service_it != hardware_info->hardware_parameters.end()) {
+    bridge_config.enable_sim_services = service_it->second != "false";
+  }
+
+  std::string error_message;
+  if (!bridge->initialize(*hardware_info, bridge_config, &error_message)) {
+    RCLCPP_ERROR(bridge_node->get_logger(), "%s", error_message.c_str());
+    rclcpp::shutdown();
+    return 1;
+  }
+
   executor->add_node(controller_manager);
+  executor->add_node(bridge_node);
+  bridge->start();
 
   std::thread control_thread([controller_manager]() {
     const int update_rate = controller_manager->get_update_rate();
@@ -49,6 +83,7 @@ int main(int argc, char ** argv)
     control_thread.join();
   }
 
+  bridge->stop();
   rclcpp::shutdown();
   return 0;
 }
