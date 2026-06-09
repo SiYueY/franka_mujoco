@@ -1,17 +1,10 @@
 #include <gtest/gtest.h>
 
-#include <algorithm>
-#include <filesystem>
 #include <fstream>
-#include <hardware_interface/hardware_info.hpp>
-#include <memory>
 #include <stdexcept>
 #include <string>
-#include <unordered_map>
-#include <vector>
 
-#include "mujoco_simulation/mujoco_imu.hpp"
-#include "mujoco_simulation/mujoco_joint.hpp"
+#include "mujoco_simulation/hardware/hardware_manager.hpp"
 
 namespace {
 
@@ -21,83 +14,6 @@ std::string write_file(const std::string& name, const std::string& contents) {
   out << contents;
   out.close();
   return path;
-}
-
-hardware_interface::InterfaceInfo make_interface(const std::string& name) {
-  hardware_interface::InterfaceInfo info;
-  info.name = name;
-  return info;
-}
-
-hardware_interface::ComponentInfo make_joint(const std::string& name,
-                                             const std::vector<std::string>& command_interfaces,
-                                             const std::vector<std::string>& state_interfaces) {
-  hardware_interface::ComponentInfo joint;
-  joint.name = name;
-  joint.type = "joint";
-  for (const auto& command : command_interfaces) {
-    joint.command_interfaces.push_back(make_interface(command));
-  }
-  for (const auto& state : state_interfaces) {
-    joint.state_interfaces.push_back(make_interface(state));
-  }
-  return joint;
-}
-
-hardware_interface::ComponentInfo make_sensor(
-    const std::string& name, const std::unordered_map<std::string, std::string>& parameters,
-    const std::vector<std::string>& state_interfaces = {}) {
-  hardware_interface::ComponentInfo sensor;
-  sensor.name = name;
-  sensor.type = "sensor";
-  sensor.parameters = parameters;
-  for (const auto& state : state_interfaces) {
-    sensor.state_interfaces.push_back(make_interface(state));
-  }
-  return sensor;
-}
-
-hardware_interface::HardwareInfo make_hardware_info(
-    const std::vector<hardware_interface::ComponentInfo>& joints,
-    const std::vector<hardware_interface::ComponentInfo>& sensors = {},
-    const std::unordered_map<std::string, std::string>& hardware_params = {}) {
-  hardware_interface::HardwareInfo info;
-  info.name = "TestSystem";
-  info.type = "system";
-  info.hardware_class_type = "mujoco_ros2_bridge/MujocoSystemInterface";
-  info.hardware_parameters = hardware_params;
-  info.joints = joints;
-  info.sensors = sensors;
-  return info;
-}
-
-std::vector<std::string> command_names(
-    const std::vector<hardware_interface::CommandInterface>& interfaces) {
-  std::vector<std::string> result;
-  for (const auto& interface : interfaces) {
-    result.push_back(interface.get_name());
-  }
-  return result;
-}
-
-std::vector<std::string> state_names(
-    const std::vector<hardware_interface::StateInterface>& interfaces) {
-  std::vector<std::string> result;
-  for (const auto& interface : interfaces) {
-    result.push_back(interface.get_name());
-  }
-  return result;
-}
-
-double state_value(const std::vector<hardware_interface::StateInterface>& interfaces,
-                   const std::string& name, const std::string& interface_name) {
-  const auto it = std::find_if(interfaces.begin(), interfaces.end(), [&](const auto& interface) {
-    return interface.get_prefix_name() == name && interface.get_interface_name() == interface_name;
-  });
-  if (it == interfaces.end()) {
-    throw std::runtime_error("State interface not found.");
-  }
-  return it->get_value();
 }
 
 struct LoadedModel {
@@ -112,6 +28,7 @@ struct LoadedModel {
       mj_deleteModel(model);
       throw std::runtime_error("Failed to create mjData.");
     }
+    mj_forward(model, data);
   }
 
   ~LoadedModel() {
@@ -129,69 +46,97 @@ struct LoadedModel {
 
 }  // namespace
 
-TEST(MujocoJointsTest, SupportsMixedMobileBaseAndPassiveJoints) {
+TEST(JointTest, ReadsStateAndWritesPositionCommandThroughActuator) {
   const std::string model_path =
-      write_file("mujoco_simulation_mobile_base.xml",
-                 "<mujoco model='mobile'>"
+      write_file("mujoco_simulation_joint_position.xml",
+                 "<mujoco model='joint_position'>"
                  "  <worldbody>"
                  "    <body name='body' pos='0 0 0.1'>"
                  "      <joint name='arm_joint' type='hinge' axis='0 0 1'/>"
-                 "      <joint name='steer_left' type='hinge' axis='0 0 1'/>"
-                 "      <joint name='drive_left' type='hinge' axis='0 1 0'/>"
-                 "      <joint name='passive_joint' type='hinge' axis='1 0 0'/>"
                  "      <geom type='sphere' size='0.05' mass='1'/>"
                  "    </body>"
                  "  </worldbody>"
                  "  <actuator>"
-                 "    <motor name='arm_joint' joint='arm_joint'/>"
-                 "    <motor name='steer_left' joint='steer_left'/>"
-                 "    <motor name='drive_left' joint='drive_left'/>"
+                 "    <motor name='arm_motor' joint='arm_joint'/>"
                  "  </actuator>"
                  "</mujoco>");
 
   LoadedModel loaded(model_path);
-  const auto info = make_hardware_info(
-      {
-          make_joint("arm_joint", {"position"}, {"position", "velocity"}),
-          make_joint("steer_left", {"position"}, {"position", "velocity"}),
-          make_joint("drive_left", {"velocity"}, {"position", "velocity"}),
-          make_joint("passive_joint", {}, {"position", "velocity"}),
-      },
-      {},
-      {
-          {"mobile_base.type", "custom_joint_group"},
-          {"mobile_base.traction_joints", "drive_left"},
-          {"mobile_base.steering_joints", "steer_left"},
-          {"mobile_base.passive_joints", "passive_joint"},
-      });
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  ASSERT_TRUE(
+      joint.init({"arm_joint", "arm_motor", mujoco_simulation::CommandInterfaceType::Position}))
+      << joint.last_error();
+  EXPECT_EQ(joint.joint_type(), mujoco_simulation::JointType::Hinge);
+  EXPECT_EQ(joint.actuator_type(), mujoco_simulation::ActuatorType::Motor);
 
-  mujoco_simulation::MujocoJoints joints;
-  std::string error_message;
-  ASSERT_TRUE(joints.configure(
-      info, *loaded.model,
-      [&info](const std::string& key, const std::string& default_value) {
-        const auto it = info.hardware_parameters.find(key);
-        return it == info.hardware_parameters.end() ? default_value : it->second;
-      },
-      &error_message))
-      << error_message;
+  const int joint_id = mj_name2id(loaded.model, mjOBJ_JOINT, "arm_joint");
+  loaded.data->qpos[loaded.model->jnt_qposadr[joint_id]] = 1.25;
+  loaded.data->qvel[loaded.model->jnt_dofadr[joint_id]] = -0.75;
+  loaded.data->qfrc_actuator[loaded.model->jnt_dofadr[joint_id]] = 0.5;
+  loaded.data->qfrc_applied[loaded.model->jnt_dofadr[joint_id]] = 0.25;
 
-  const auto commands = command_names(joints.export_command_interfaces(info.joints));
-  const auto states = state_names(joints.export_state_interfaces(info.joints));
+  mujoco_simulation::JointState state;
+  ASSERT_TRUE(joint.read(state)) << joint.last_error();
+  EXPECT_DOUBLE_EQ(state.position, 1.25);
+  EXPECT_DOUBLE_EQ(state.velocity, -0.75);
+  EXPECT_DOUBLE_EQ(state.effort, 0.75);
 
-  EXPECT_NE(std::find(commands.begin(), commands.end(), "arm_joint/position"), commands.end());
-  EXPECT_NE(std::find(commands.begin(), commands.end(), "steer_left/position"), commands.end());
-  EXPECT_NE(std::find(commands.begin(), commands.end(), "drive_left/velocity"), commands.end());
-  EXPECT_EQ(std::find(commands.begin(), commands.end(), "passive_joint/position"), commands.end());
-  EXPECT_NE(std::find(states.begin(), states.end(), "passive_joint/position"), states.end());
-  EXPECT_NE(std::find(states.begin(), states.end(), "passive_joint/velocity"), states.end());
-  EXPECT_EQ(joints.mobile_base().type, mujoco_simulation::MobileBaseType::CustomJointGroup);
+  ASSERT_TRUE(joint.write({"", 2.5, 0.0, 0.0, 0.0})) << joint.last_error();
+  const int actuator_id = mj_name2id(loaded.model, mjOBJ_ACTUATOR, "arm_motor");
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[actuator_id], 2.5);
 }
 
-TEST(MujocoJointsTest, FailsWhenCommandJointHasNoActuator) {
+TEST(JointTest, DetectsSlideJointAndPositionActuator) {
   const std::string model_path =
-      write_file("mujoco_simulation_missing_actuator.xml",
-                 "<mujoco model='missing_actuator'>"
+      write_file("mujoco_simulation_joint_slide_position.xml",
+                 "<mujoco model='joint_slide_position'>"
+                 "  <worldbody>"
+                 "    <body name='body' pos='0 0 0.1'>"
+                 "      <joint name='slider_joint' type='slide' axis='1 0 0'/>"
+                 "      <geom type='sphere' size='0.05' mass='1'/>"
+                 "    </body>"
+                 "  </worldbody>"
+                 "  <actuator>"
+                 "    <position name='slider_position' joint='slider_joint' kp='10'/>"
+                 "  </actuator>"
+                 "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  ASSERT_TRUE(joint.init(
+      {"slider_joint", "slider_position", mujoco_simulation::CommandInterfaceType::Position}))
+      << joint.last_error();
+  EXPECT_EQ(joint.joint_type(), mujoco_simulation::JointType::Slide);
+  EXPECT_EQ(joint.actuator_type(), mujoco_simulation::ActuatorType::Position);
+}
+
+TEST(JointTest, WritesEffortWithoutActuator) {
+  const std::string model_path =
+      write_file("mujoco_simulation_joint_effort.xml",
+                 "<mujoco model='joint_effort'>"
+                 "  <worldbody>"
+                 "    <body name='body' pos='0 0 0.1'>"
+                 "      <joint name='free_joint' type='hinge' axis='0 0 1'/>"
+                 "      <geom type='sphere' size='0.05' mass='1'/>"
+                 "    </body>"
+                 "  </worldbody>"
+                 "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  ASSERT_TRUE(joint.init({"free_joint", "", mujoco_simulation::CommandInterfaceType::Effort}))
+      << joint.last_error();
+  EXPECT_EQ(joint.actuator_type(), mujoco_simulation::ActuatorType::Passive);
+  ASSERT_TRUE(joint.write({"", 0.0, 0.0, 0.0, 3.2})) << joint.last_error();
+
+  const int joint_id = mj_name2id(loaded.model, mjOBJ_JOINT, "free_joint");
+  EXPECT_DOUBLE_EQ(loaded.data->qfrc_applied[loaded.model->jnt_dofadr[joint_id]], 3.2);
+}
+
+TEST(JointTest, FailsWhenPositionJointHasNoActuator) {
+  const std::string model_path =
+      write_file("mujoco_simulation_joint_missing_actuator.xml",
+                 "<mujoco model='joint_missing_actuator'>"
                  "  <worldbody>"
                  "    <body name='body' pos='0 0 0.1'>"
                  "      <joint name='bad_joint' type='hinge' axis='0 0 1'/>"
@@ -201,82 +146,329 @@ TEST(MujocoJointsTest, FailsWhenCommandJointHasNoActuator) {
                  "</mujoco>");
 
   LoadedModel loaded(model_path);
-  const auto info = make_hardware_info({make_joint("bad_joint", {"position"}, {"position"})});
-
-  mujoco_simulation::MujocoJoints joints;
-  std::string error_message;
-  EXPECT_FALSE(joints.configure(
-      info, *loaded.model,
-      [&info](const std::string& key, const std::string& default_value) {
-        const auto it = info.hardware_parameters.find(key);
-        return it == info.hardware_parameters.end() ? default_value : it->second;
-      },
-      &error_message));
-  EXPECT_NE(error_message.find("MuJoCo actuator not found"), std::string::npos);
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  EXPECT_FALSE(joint.init({"bad_joint", "", mujoco_simulation::CommandInterfaceType::Position}));
+  EXPECT_NE(joint.last_error().find("passive joint"), std::string::npos);
 }
 
-TEST(MujocoImuTest, ExportsInterfacesAndReadsSensorData) {
+TEST(JointTest, FailsWhenEffortCommandUsesVelocityActuator) {
   const std::string model_path =
-      write_file("mujoco_simulation_imu.xml",
-                 "<mujoco model='imu'>"
+      write_file("mujoco_simulation_joint_velocity_actuator.xml",
+                 "<mujoco model='joint_velocity_actuator'>"
                  "  <worldbody>"
                  "    <body name='body' pos='0 0 0.1'>"
+                 "      <joint name='wheel_joint' type='hinge' axis='0 0 1'/>"
+                 "      <geom type='sphere' size='0.05' mass='1'/>"
+                 "    </body>"
+                 "  </worldbody>"
+                 "  <actuator>"
+                 "    <velocity name='wheel_velocity' joint='wheel_joint' kv='1'/>"
+                 "  </actuator>"
+                 "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  EXPECT_FALSE(joint.init(
+      {"wheel_joint", "wheel_velocity", mujoco_simulation::CommandInterfaceType::Effort}));
+  EXPECT_NE(joint.last_error().find("position/velocity actuator"), std::string::npos);
+}
+
+TEST(JointTest, FailsForBallJoint) {
+  const std::string model_path = write_file("mujoco_simulation_ball_joint.xml",
+                                            "<mujoco model='ball_joint'>"
+                                            "  <worldbody>"
+                                            "    <body name='body' pos='0 0 0.1'>"
+                                            "      <joint name='ball_joint' type='ball'/>"
+                                            "      <geom type='sphere' size='0.05' mass='1'/>"
+                                            "    </body>"
+                                            "  </worldbody>"
+                                            "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  EXPECT_FALSE(joint.init({"ball_joint", "", mujoco_simulation::CommandInterfaceType::None}));
+  EXPECT_NE(joint.last_error().find("only supports 1-DoF"), std::string::npos);
+}
+
+TEST(JointTest, FailsForFreeJoint) {
+  const std::string model_path = write_file("mujoco_simulation_free_joint.xml",
+                                            "<mujoco model='free_joint'>"
+                                            "  <worldbody>"
+                                            "    <body name='body' pos='0 0 0.1'>"
+                                            "      <joint name='root_joint' type='free'/>"
+                                            "      <geom type='sphere' size='0.05' mass='1'/>"
+                                            "    </body>"
+                                            "  </worldbody>"
+                                            "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  EXPECT_FALSE(joint.init({"root_joint", "", mujoco_simulation::CommandInterfaceType::None}));
+  EXPECT_NE(joint.last_error().find("only supports 1-DoF"), std::string::npos);
+}
+
+TEST(JointTest, AutoDiscoversJointActuator) {
+  const std::string model_path =
+      write_file("mujoco_simulation_joint_autodiscovery.xml",
+                 "<mujoco model='joint_autodiscovery'>"
+                 "  <worldbody>"
+                 "    <body name='body' pos='0 0 0.1'>"
+                 "      <joint name='auto_joint' type='hinge' axis='0 0 1'/>"
+                 "      <geom type='sphere' size='0.05' mass='1'/>"
+                 "    </body>"
+                 "  </worldbody>"
+                 "  <actuator>"
+                 "    <motor name='auto_motor' joint='auto_joint'/>"
+                 "  </actuator>"
+                 "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Joint joint(loaded.model, loaded.data);
+  ASSERT_TRUE(joint.init({"auto_joint", "", mujoco_simulation::CommandInterfaceType::Velocity}))
+      << joint.last_error();
+  EXPECT_EQ(joint.actuator_type(), mujoco_simulation::ActuatorType::Motor);
+}
+
+TEST(LidarTest, BindsBeamNamesWithZeroPaddingAndReadsRanges) {
+  const std::string model_path = write_file("mujoco_simulation_lidar.xml",
+                                            "<mujoco model='lidar'>"
+                                            "  <worldbody>"
+                                            "    <body name='body' pos='0 0 0.2'>"
+                                            "      <site name='lidar_site' pos='0 0 0'/>"
+                                            "      <geom type='sphere' size='0.05' mass='1'/>"
+                                            "    </body>"
+                                            "  </worldbody>"
+                                            "  <sensor>"
+                                            "    <rangefinder name='scan-000' site='lidar_site'/>"
+                                            "    <rangefinder name='scan-001' site='lidar_site'/>"
+                                            "    <rangefinder name='scan-002' site='lidar_site'/>"
+                                            "  </sensor>"
+                                            "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Lidar lidar(loaded.model, loaded.data);
+  ASSERT_TRUE(lidar.init({"front_lidar", "laser_frame", "scan", -1.0, 1.0, 1.0, 0.1, 5.0}))
+      << lidar.last_error();
+
+  for (int i = 0; i < 3; ++i) {
+    const std::string sensor_name = "scan-00" + std::to_string(i);
+    const int sensor_id = mj_name2id(loaded.model, mjOBJ_SENSOR, sensor_name.c_str());
+    loaded.data->sensordata[loaded.model->sensor_adr[sensor_id]] = i == 1 ? 6.0 : 1.0 + i;
+  }
+
+  mujoco_simulation::LidarState state;
+  ASSERT_TRUE(lidar.read(state)) << lidar.last_error();
+  ASSERT_EQ(state.laser_scan.ranges.size(), 3U);
+  EXPECT_DOUBLE_EQ(state.laser_scan.ranges[0], 1.0);
+  EXPECT_DOUBLE_EQ(state.laser_scan.ranges[1], -1.0);
+  EXPECT_DOUBLE_EQ(state.laser_scan.ranges[2], 3.0);
+}
+
+TEST(LidarTest, FailsWhenBeamIsMissing) {
+  const std::string model_path = write_file("mujoco_simulation_lidar_missing_beam.xml",
+                                            "<mujoco model='lidar_missing_beam'>"
+                                            "  <worldbody>"
+                                            "    <body name='body' pos='0 0 0.2'>"
+                                            "      <site name='lidar_site' pos='0 0 0'/>"
+                                            "      <geom type='sphere' size='0.05' mass='1'/>"
+                                            "    </body>"
+                                            "  </worldbody>"
+                                            "  <sensor>"
+                                            "    <rangefinder name='scan-0' site='lidar_site'/>"
+                                            "    <rangefinder name='scan-2' site='lidar_site'/>"
+                                            "  </sensor>"
+                                            "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::Lidar lidar(loaded.model, loaded.data);
+  EXPECT_FALSE(lidar.init({"front_lidar", "laser_frame", "scan", -1.0, 1.0, 1.0, 0.1, 5.0}));
+  EXPECT_NE(lidar.last_error().find("missing"), std::string::npos);
+}
+
+TEST(HardwareManagerTest, RegistersDevicesAndReadsAllStates) {
+  const std::string model_path =
+      write_file("mujoco_simulation_manager.xml",
+                 "<mujoco model='manager'>"
+                 "  <worldbody>"
+                 "    <body name='body' pos='0 0 0.2'>"
+                 "      <joint name='arm_joint' type='hinge' axis='0 0 1'/>"
                  "      <site name='imu_site' pos='0 0 0'/>"
                  "      <geom type='sphere' size='0.05' mass='1'/>"
                  "    </body>"
                  "  </worldbody>"
+                 "  <actuator>"
+                 "    <motor name='arm_motor' joint='arm_joint'/>"
+                 "  </actuator>"
                  "  <sensor>"
                  "    <framequat name='imu_quat' objtype='site' objname='imu_site'/>"
                  "    <gyro name='imu_gyro' site='imu_site'/>"
                  "    <accelerometer name='imu_accel' site='imu_site'/>"
+                 "    <rangefinder name='scan-0' site='imu_site'/>"
                  "  </sensor>"
                  "</mujoco>");
 
   LoadedModel loaded(model_path);
-  const std::vector<hardware_interface::ComponentInfo> sensors = {
-      make_sensor("imu",
-                  {
-                      {"mujoco_type", "imu"},
-                      {"mujoco_orientation_sensor", "imu_quat"},
-                      {"mujoco_gyro_sensor", "imu_gyro"},
-                      {"mujoco_accel_sensor", "imu_accel"},
-                  },
-                  {
-                      "orientation.x",
-                      "orientation.y",
-                      "orientation.z",
-                      "orientation.w",
-                      "angular_velocity.x",
-                      "angular_velocity.y",
-                      "angular_velocity.z",
-                      "linear_acceleration.x",
-                      "linear_acceleration.y",
-                      "linear_acceleration.z",
-                  })};
+  mujoco_simulation::HardwareManager manager(loaded.model, loaded.data);
 
-  mujoco_simulation::MujocoImus imu;
-  std::string error_message;
-  ASSERT_TRUE(imu.configure(sensors, *loaded.model, &error_message)) << error_message;
+  ASSERT_TRUE(manager.register_joint(
+      {"arm_joint", "arm_motor", mujoco_simulation::CommandInterfaceType::Velocity}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_imu({"imu", "imu_quat", "imu_gyro", "imu_accel"}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_lidar({"lidar", "laser_frame", "scan", 0.0, 0.0, 1.0, 0.1, 10.0}))
+      << manager.last_error();
 
-  auto interfaces = imu.export_state_interfaces(sensors);
-  const int quat_id = mj_name2id(loaded.model, mjOBJ_SENSOR, "imu_quat");
-  const int gyro_id = mj_name2id(loaded.model, mjOBJ_SENSOR, "imu_gyro");
-  const int accel_id = mj_name2id(loaded.model, mjOBJ_SENSOR, "imu_accel");
-  loaded.data->sensordata[loaded.model->sensor_adr[quat_id]] = 1.0;
-  loaded.data->sensordata[loaded.model->sensor_adr[quat_id] + 1] = 0.1;
-  loaded.data->sensordata[loaded.model->sensor_adr[quat_id] + 2] = 0.2;
-  loaded.data->sensordata[loaded.model->sensor_adr[quat_id] + 3] = 0.3;
-  loaded.data->sensordata[loaded.model->sensor_adr[gyro_id]] = 1.1;
-  loaded.data->sensordata[loaded.model->sensor_adr[gyro_id] + 1] = 1.2;
-  loaded.data->sensordata[loaded.model->sensor_adr[gyro_id] + 2] = 1.3;
-  loaded.data->sensordata[loaded.model->sensor_adr[accel_id]] = 2.1;
-  loaded.data->sensordata[loaded.model->sensor_adr[accel_id] + 1] = 2.2;
-  loaded.data->sensordata[loaded.model->sensor_adr[accel_id] + 2] = 2.3;
+  loaded.data->qpos[loaded.model->jnt_qposadr[mj_name2id(loaded.model, mjOBJ_JOINT, "arm_joint")]] =
+      0.5;
+  loaded.data->qvel[loaded.model->jnt_dofadr[mj_name2id(loaded.model, mjOBJ_JOINT, "arm_joint")]] =
+      -1.0;
+  loaded.data
+      ->sensordata[loaded.model->sensor_adr[mj_name2id(loaded.model, mjOBJ_SENSOR, "scan-0")]] =
+      2.5;
 
-  imu.read(*loaded.data);
+  ASSERT_TRUE(manager.write_joint("arm_joint", {"", 0.0, 4.2, 0.0, 0.0})) << manager.last_error();
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[mj_name2id(loaded.model, mjOBJ_ACTUATOR, "arm_motor")], 4.2);
 
-  EXPECT_DOUBLE_EQ(state_value(interfaces, "imu", "orientation.w"), 1.0);
-  EXPECT_DOUBLE_EQ(state_value(interfaces, "imu", "orientation.x"), 0.1);
-  EXPECT_DOUBLE_EQ(state_value(interfaces, "imu", "angular_velocity.z"), 1.3);
-  EXPECT_DOUBLE_EQ(state_value(interfaces, "imu", "linear_acceleration.y"), 2.2);
+  auto joint_states = manager.read_joint_states();
+  auto lidar_states = manager.read_lidar_states();
+  ASSERT_EQ(joint_states.size(), 1U);
+  ASSERT_EQ(lidar_states.size(), 1U);
+  EXPECT_DOUBLE_EQ(joint_states.at("arm_joint").position, 0.5);
+  EXPECT_DOUBLE_EQ(lidar_states.at("lidar").laser_scan.ranges.at(0), 2.5);
+
+  ASSERT_TRUE(manager.reset_all()) << manager.last_error();
+  ASSERT_TRUE(manager.unregister_lidar("lidar")) << manager.last_error();
+
+  mujoco_simulation::LidarState lidar_state;
+  EXPECT_FALSE(manager.read_lidar("lidar", lidar_state));
+  EXPECT_NE(manager.last_error().find("not found"), std::string::npos);
+}
+
+TEST(MobileBaseTest, DifferentialBaseMapsTwistToWheelVelocities) {
+  const std::string model_path =
+      write_file("mujoco_simulation_diff_base.xml",
+                 "<mujoco model='diff_base'>"
+                 "  <worldbody>"
+                 "    <body name='body' pos='0 0 0.1'>"
+                 "      <joint name='left_wheel_joint' type='hinge' axis='0 1 0'/>"
+                 "      <joint name='right_wheel_joint' type='hinge' axis='0 1 0'/>"
+                 "      <geom type='sphere' size='0.05' mass='1'/>"
+                 "    </body>"
+                 "  </worldbody>"
+                 "  <actuator>"
+                 "    <motor name='left_motor' joint='left_wheel_joint'/>"
+                 "    <motor name='right_motor' joint='right_wheel_joint'/>"
+                 "  </actuator>"
+                 "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::HardwareManager manager(loaded.model, loaded.data);
+  ASSERT_TRUE(manager.register_joint(
+      {"left_wheel_joint", "left_motor", mujoco_simulation::CommandInterfaceType::Velocity}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_joint(
+      {"right_wheel_joint", "right_motor", mujoco_simulation::CommandInterfaceType::Velocity}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_mobile_base({"base",
+                                            mujoco_simulation::MobileBaseType::Differential,
+                                            "base_link",
+                                            "odom",
+                                            {"left_wheel_joint", "right_wheel_joint"},
+                                            {},
+                                            0.2,
+                                            0.6,
+                                            0.0}))
+      << manager.last_error();
+
+  ASSERT_TRUE(manager.write_mobile_base("base", {{1.0, 0.0, 0.0}, {0.0, 0.0, 0.5}}))
+      << manager.last_error();
+  const int left_actuator = mj_name2id(loaded.model, mjOBJ_ACTUATOR, "left_motor");
+  const int right_actuator = mj_name2id(loaded.model, mjOBJ_ACTUATOR, "right_motor");
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[left_actuator], 4.25);
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[right_actuator], 5.75);
+
+  const int left_joint = mj_name2id(loaded.model, mjOBJ_JOINT, "left_wheel_joint");
+  const int right_joint = mj_name2id(loaded.model, mjOBJ_JOINT, "right_wheel_joint");
+  loaded.data->qvel[loaded.model->jnt_dofadr[left_joint]] = 4.25;
+  loaded.data->qvel[loaded.model->jnt_dofadr[right_joint]] = 5.75;
+
+  mujoco_simulation::MobileBaseState state;
+  ASSERT_TRUE(manager.read_mobile_base("base", state)) << manager.last_error();
+  EXPECT_DOUBLE_EQ(state.linear[0], 1.0);
+  EXPECT_DOUBLE_EQ(state.linear[1], 0.0);
+  EXPECT_DOUBLE_EQ(state.angular[2], 0.5);
+}
+
+TEST(MobileBaseTest, OmnidirectionalBaseMapsTwistToWheelVelocities) {
+  const std::string model_path =
+      write_file("mujoco_simulation_omni_base.xml",
+                 "<mujoco model='omni_base'>"
+                 "  <worldbody>"
+                 "    <body name='body' pos='0 0 0.1'>"
+                 "      <joint name='front_left_joint' type='hinge' axis='0 1 0'/>"
+                 "      <joint name='front_right_joint' type='hinge' axis='0 1 0'/>"
+                 "      <joint name='rear_left_joint' type='hinge' axis='0 1 0'/>"
+                 "      <joint name='rear_right_joint' type='hinge' axis='0 1 0'/>"
+                 "      <geom type='sphere' size='0.05' mass='1'/>"
+                 "    </body>"
+                 "  </worldbody>"
+                 "  <actuator>"
+                 "    <motor name='front_left_motor' joint='front_left_joint'/>"
+                 "    <motor name='front_right_motor' joint='front_right_joint'/>"
+                 "    <motor name='rear_left_motor' joint='rear_left_joint'/>"
+                 "    <motor name='rear_right_motor' joint='rear_right_joint'/>"
+                 "  </actuator>"
+                 "</mujoco>");
+
+  LoadedModel loaded(model_path);
+  mujoco_simulation::HardwareManager manager(loaded.model, loaded.data);
+  ASSERT_TRUE(manager.register_joint(
+      {"front_left_joint", "front_left_motor", mujoco_simulation::CommandInterfaceType::Velocity}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_joint({"front_right_joint", "front_right_motor",
+                                      mujoco_simulation::CommandInterfaceType::Velocity}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_joint(
+      {"rear_left_joint", "rear_left_motor", mujoco_simulation::CommandInterfaceType::Velocity}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_joint(
+      {"rear_right_joint", "rear_right_motor", mujoco_simulation::CommandInterfaceType::Velocity}))
+      << manager.last_error();
+  ASSERT_TRUE(manager.register_mobile_base(
+      {"omni",
+       mujoco_simulation::MobileBaseType::Omnidirectional,
+       "base_link",
+       "odom",
+       {"front_left_joint", "front_right_joint", "rear_left_joint", "rear_right_joint"},
+       {},
+       0.1,
+       0.4,
+       0.3}))
+      << manager.last_error();
+
+  ASSERT_TRUE(manager.write_mobile_base("omni", {{1.0, 0.5, 0.0}, {0.0, 0.0, 0.2}}))
+      << manager.last_error();
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[mj_name2id(loaded.model, mjOBJ_ACTUATOR, "front_left_motor")],
+                   3.6);
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[mj_name2id(loaded.model, mjOBJ_ACTUATOR, "front_right_motor")],
+                   16.4);
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[mj_name2id(loaded.model, mjOBJ_ACTUATOR, "rear_left_motor")],
+                   13.6);
+  EXPECT_DOUBLE_EQ(loaded.data->ctrl[mj_name2id(loaded.model, mjOBJ_ACTUATOR, "rear_right_motor")],
+                   6.4);
+
+  const int fl_joint = mj_name2id(loaded.model, mjOBJ_JOINT, "front_left_joint");
+  const int fr_joint = mj_name2id(loaded.model, mjOBJ_JOINT, "front_right_joint");
+  const int rl_joint = mj_name2id(loaded.model, mjOBJ_JOINT, "rear_left_joint");
+  const int rr_joint = mj_name2id(loaded.model, mjOBJ_JOINT, "rear_right_joint");
+  loaded.data->qvel[loaded.model->jnt_dofadr[fl_joint]] = 3.6;
+  loaded.data->qvel[loaded.model->jnt_dofadr[fr_joint]] = 16.4;
+  loaded.data->qvel[loaded.model->jnt_dofadr[rl_joint]] = 13.6;
+  loaded.data->qvel[loaded.model->jnt_dofadr[rr_joint]] = 6.4;
+
+  mujoco_simulation::MobileBaseState state;
+  ASSERT_TRUE(manager.read_mobile_base("omni", state)) << manager.last_error();
+  EXPECT_NEAR(state.linear[0], 1.0, 1e-9);
+  EXPECT_NEAR(state.linear[1], 0.5, 1e-9);
+  EXPECT_NEAR(state.angular[2], 0.2, 1e-9);
 }

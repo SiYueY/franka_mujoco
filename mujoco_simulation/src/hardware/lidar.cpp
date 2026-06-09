@@ -1,177 +1,114 @@
+#include "mujoco_simulation/hardware/lidar.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
-#include <cstring>
-#include <utility>
-
-#include "mujoco_simulation/mujoco_lidar.hpp"
 
 namespace mujoco_simulation {
 namespace {
 
-std::string sensor_parameter(const hardware_interface::ComponentInfo &sensor,
-                             const std::string &key, const std::string &default_value = "") {
-  const auto it = sensor.parameters.find(key);
-  return it == sensor.parameters.end() ? default_value : it->second;
-}
+int parse_beam_index(const std::string& sensor_name, const std::string& prefix) {
+  const std::string expected_prefix = prefix + "-";
+  if (sensor_name.rfind(expected_prefix, 0) != 0) {
+    return -1;
+  }
 
-std::pair<std::string, int> parse_beam_name(const std::string &sensor_name) {
-  const auto split = sensor_name.find_last_of('-');
-  if (split == std::string::npos) {
-    return {sensor_name, -1};
+  const std::string suffix = sensor_name.substr(expected_prefix.size());
+  if (suffix.empty() || !std::all_of(suffix.begin(), suffix.end(),
+                                     [](unsigned char c) { return std::isdigit(c) != 0; })) {
+    return -1;
   }
-  const auto prefix = sensor_name.substr(0, split);
-  const auto beam_string = sensor_name.substr(split + 1);
-  if (beam_string.empty() || !std::all_of(beam_string.begin(), beam_string.end(),
-                                          [](unsigned char c) { return std::isdigit(c) != 0; })) {
-    return {prefix, -1};
-  }
-  return {prefix, std::stoi(beam_string)};
+  return std::stoi(suffix);
 }
 
 }  // namespace
 
-MujocoLidars::MujocoLidars(rclcpp::Node::SharedPtr node, MuJoCoSimulation *simulation)
-    : node_(std::move(node)), simulation_(simulation) {}
+Lidar::Lidar(const mjModel* model, mjData* data) : model_(model), mj_data_(data) {}
 
-MujocoLidars::~MujocoLidars() { stop(); }
+bool Lidar::init(const LidarData& data) {
+  data_ = data;
+  state_ = {};
+  sensor_addresses_.clear();
+  last_error_.clear();
 
-bool MujocoLidars::register_lidars(const hardware_interface::HardwareInfo &hardware_info,
-                                   std::string *error_message) {
-  lidars_.clear();
-  const mjModel *model = simulation_ != nullptr ? simulation_->model() : nullptr;
-  if (model == nullptr) {
-    if (error_message != nullptr) {
-      *error_message = "MuJoCo model is not loaded for lidar registration.";
-    }
-    return false;
+  if (model_ == nullptr || mj_data_ == nullptr) {
+    return set_error("MuJoCo model/data is not available for lidar '" + data.name + "'.");
+  }
+  if (data.sensor_prefix.empty()) {
+    return set_error("Lidar '" + data.name + "' requires a non-empty sensor_prefix.");
+  }
+  if (data.angle_increment <= 0.0 || data.angle_max < data.angle_min) {
+    return set_error("Lidar '" + data.name + "' has invalid angular configuration.");
   }
 
-  for (const auto &sensor : hardware_info.sensors) {
-    if (sensor_parameter(sensor, "mujoco_type") != "lidar") {
+  const double span = (data.angle_max - data.angle_min) / data.angle_increment;
+  const int beam_count = static_cast<int>(std::llround(span)) + 1;
+  if (beam_count <= 0) {
+    return set_error("Lidar '" + data.name + "' computed an invalid beam count.");
+  }
+
+  sensor_addresses_.assign(static_cast<std::size_t>(beam_count), -1);
+  for (int sensor_id = 0; sensor_id < model_->nsensor; ++sensor_id) {
+    if (model_->sensor_type[sensor_id] != mjSENS_RANGEFINDER) {
+      continue;
+    }
+    const char* sensor_name = mj_id2name(model_, mjOBJ_SENSOR, sensor_id);
+    if (sensor_name == nullptr) {
       continue;
     }
 
-    const std::string prefix = sensor_parameter(sensor, "mujoco_sensor_prefix");
-    const std::string frame_name = sensor_parameter(sensor, "frame_name");
-    if (prefix.empty() || frame_name.empty()) {
-      if (error_message != nullptr) {
-        *error_message =
-            "Lidar sensor '" + sensor.name + "' requires mujoco_sensor_prefix and frame_name.";
-      }
-      return false;
+    const int beam_index = parse_beam_index(sensor_name, data.sensor_prefix);
+    if (beam_index < 0 || beam_index >= beam_count) {
+      continue;
     }
-
-    LidarData binding;
-    binding.sensor_name = sensor.name;
-    binding.sensor_prefix = prefix;
-    binding.frame_name = frame_name;
-    binding.scan_topic = sensor_parameter(sensor, "scan_topic", "/" + sensor.name + "/scan");
-    binding.publish_rate = std::stod(sensor_parameter(sensor, "publish_rate", "5.0"));
-    binding.angle_min = std::stod(sensor_parameter(sensor, "angle_min"));
-    binding.angle_max = std::stod(sensor_parameter(sensor, "angle_max"));
-    binding.angle_increment = std::stod(sensor_parameter(sensor, "angle_increment"));
-    binding.range_min = std::stod(sensor_parameter(sensor, "range_min"));
-    binding.range_max = std::stod(sensor_parameter(sensor, "range_max"));
-    if (binding.angle_increment <= 0.0 || binding.angle_max < binding.angle_min) {
-      if (error_message != nullptr) {
-        *error_message = "Lidar sensor '" + sensor.name + "' has invalid angular configuration.";
-      }
-      return false;
-    }
-
-    const int beam_count = static_cast<int>(std::llround((binding.angle_max - binding.angle_min) /
-                                                         binding.angle_increment)) +
-                           1;
-    binding.sensor_indices.assign(static_cast<std::size_t>(beam_count), -1);
-    for (int idx = 0; idx < model->nsensor; ++idx) {
-      if (model->sensor_type[idx] != mjSENS_RANGEFINDER) {
-        continue;
-      }
-      const char *name = mj_id2name(model, mjOBJ_SENSOR, idx);
-      if (name == nullptr) {
-        continue;
-      }
-      const auto [beam_prefix, beam_index] = parse_beam_name(name);
-      if (beam_prefix != prefix || beam_index < 0 || beam_index >= beam_count) {
-        continue;
-      }
-      binding.sensor_indices[static_cast<std::size_t>(beam_index)] = model->sensor_adr[idx];
-    }
-    if (std::find(binding.sensor_indices.begin(), binding.sensor_indices.end(), -1) !=
-        binding.sensor_indices.end()) {
-      if (error_message != nullptr) {
-        *error_message =
-            "Lidar sensor '" + sensor.name + "' is missing one or more rangefinder beams.";
-      }
-      return false;
-    }
-
-    binding.scan_msg.header.frame_id = binding.frame_name;
-    binding.scan_msg.angle_min = static_cast<float>(binding.angle_min);
-    binding.scan_msg.angle_max = static_cast<float>(binding.angle_max);
-    binding.scan_msg.angle_increment = static_cast<float>(binding.angle_increment);
-    binding.scan_msg.range_min = static_cast<float>(binding.range_min);
-    binding.scan_msg.range_max = static_cast<float>(binding.range_max);
-    binding.scan_msg.scan_time = static_cast<float>(1.0 / binding.publish_rate);
-    binding.scan_publisher =
-        node_->create_publisher<sensor_msgs::msg::LaserScan>(binding.scan_topic, rclcpp::QoS(1));
-    lidars_.push_back(std::move(binding));
+    sensor_addresses_[static_cast<std::size_t>(beam_index)] = model_->sensor_adr[sensor_id];
   }
 
-  if (!lidars_.empty()) {
-    sensor_data_.resize(static_cast<std::size_t>(model->nsensordata));
+  if (std::find(sensor_addresses_.begin(), sensor_addresses_.end(), -1) !=
+      sensor_addresses_.end()) {
+    return set_error("Lidar '" + data.name + "' is missing one or more rangefinder beams.");
   }
+
+  state_.frame_id = data.frame_name;
+  state_.angle_min = data.angle_min;
+  state_.angle_max = data.angle_max;
+  state_.angle_increment = data.angle_increment;
+  state_.range_min = data.range_min;
+  state_.range_max = data.range_max;
+  state_.ranges.assign(sensor_addresses_.size(), -1.0);
   return true;
 }
 
-void MujocoLidars::start() {
-  if (lidars_.empty() || publish_lidar_.exchange(true)) {
-    return;
-  }
-  publish_thread_ = std::thread(&MujocoLidars::update_loop, this);
+bool Lidar::reset() {
+  last_error_.clear();
+  std::fill(state_.ranges.begin(), state_.ranges.end(), -1.0);
+  return true;
 }
 
-void MujocoLidars::stop() {
-  publish_lidar_.store(false);
-  if (publish_thread_.joinable()) {
-    publish_thread_.join();
-  }
+bool Lidar::write(const LidarCommand&) {
+  last_error_.clear();
+  return true;
 }
 
-void MujocoLidars::update_loop() {
-  double max_publish_rate = 1.0;
-  for (const auto &lidar : lidars_) {
-    max_publish_rate = std::max(max_publish_rate, lidar.publish_rate);
+bool Lidar::read(LidarState& state) {
+  last_error_.clear();
+  if (mj_data_ == nullptr || sensor_addresses_.empty()) {
+    return set_error("Lidar '" + data_.name + "' is not initialized.");
   }
-  rclcpp::Rate rate(max_publish_rate);
-  while (rclcpp::ok() && publish_lidar_.load()) {
-    update_once();
-    rate.sleep();
+
+  for (std::size_t i = 0; i < sensor_addresses_.size(); ++i) {
+    const int address = sensor_addresses_[i];
+    const double range = mj_data_->sensordata[address];
+    state_.ranges[i] = (range < data_.range_min || range > data_.range_max) ? -1.0 : range;
   }
+
+  state = state_;
+  return true;
 }
 
-void MujocoLidars::update_once() {
-  if (sensor_data_.empty()) {
-    return;
-  }
-
-  simulation_->with_locked_data([this](const mjModel &, mjData &data) {
-    std::memcpy(sensor_data_.data(), data.sensordata, sensor_data_.size() * sizeof(mjtNum));
-  });
-
-  const auto now = node_->now();
-  for (auto &lidar : lidars_) {
-    lidar.scan_msg.header.stamp = now;
-    lidar.scan_msg.ranges.resize(lidar.sensor_indices.size(), -1.0f);
-    for (std::size_t i = 0; i < lidar.sensor_indices.size(); ++i) {
-      const auto range =
-          static_cast<float>(sensor_data_[static_cast<std::size_t>(lidar.sensor_indices[i])]);
-      lidar.scan_msg.ranges[i] =
-          (range < lidar.scan_msg.range_min || range > lidar.scan_msg.range_max) ? -1.0f : range;
-    }
-    lidar.scan_publisher->publish(lidar.scan_msg);
-  }
+bool Lidar::set_error(const std::string& message) {
+  last_error_ = message;
+  return false;
 }
 
 }  // namespace mujoco_simulation

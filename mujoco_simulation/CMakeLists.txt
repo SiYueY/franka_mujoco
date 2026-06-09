@@ -37,20 +37,20 @@ else()
 endif()
 
 add_library(lodepng STATIC
-  src/lodepng/lodepng.cpp
+  src/viewer/lodepng/lodepng.cpp
 )
 target_include_directories(lodepng PRIVATE
-  src/lodepng
+  src/viewer/lodepng
 )
 set_target_properties(lodepng PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(mujoco_platform_ui_adapter OBJECT
-  src/simulate/glfw_adapter.cc
-  src/simulate/glfw_dispatch.cc
-  src/simulate/platform_ui_adapter.cc
+  src/viewer/simulate/glfw_adapter.cc
+  src/viewer/simulate/glfw_dispatch.cc
+  src/viewer/simulate/platform_ui_adapter.cc
 )
 target_include_directories(mujoco_platform_ui_adapter PRIVATE
-  src/simulate
+  src/viewer/simulate
   ${MUJOCO_INCLUDE_DIR}
 )
 target_link_libraries(mujoco_platform_ui_adapter PRIVATE
@@ -61,11 +61,11 @@ set_target_properties(mujoco_platform_ui_adapter PROPERTIES POSITION_INDEPENDENT
 
 add_library(mujoco_official_simulate STATIC
   $<TARGET_OBJECTS:mujoco_platform_ui_adapter>
-  src/simulate/simulate.cc
+  src/viewer/simulate/simulate.cc
 )
 target_include_directories(mujoco_official_simulate PRIVATE
-  src/simulate
-  src/lodepng
+  src/viewer/simulate
+  src/viewer/lodepng
   ${MUJOCO_INCLUDE_DIR}
 )
 target_link_libraries(mujoco_official_simulate PRIVATE
@@ -77,11 +77,14 @@ target_link_libraries(mujoco_official_simulate PRIVATE
 set_target_properties(mujoco_official_simulate PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_library(${PROJECT_NAME} SHARED
-  src/mujoco_camera.cpp
-  src/mujoco_imu.cpp
-  src/mujoco_joint.cpp
-  src/mujoco_lidar.cpp
+  src/hardware/camera.cpp
+  src/hardware/hardware_manager.cpp
+  src/hardware/imu.cpp
+  src/hardware/joint.cpp
+  src/hardware/lidar.cpp
+  src/hardware/mobile_base.cpp
   src/mujoco_simulation.cpp
+  src/viewer/viewer.cpp
 )
 target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -89,8 +92,8 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   ${MUJOCO_INCLUDE_DIR}
 )
 target_include_directories(${PROJECT_NAME} PRIVATE
-  src/simulate
-  src/lodepng
+  src/viewer/simulate
+  src/viewer/lodepng
 )
 target_link_libraries(${PROJECT_NAME} PUBLIC
   hardware_interface::hardware_interface

@@ -2,8 +2,10 @@
 
 #include <mujoco/mujoco.h>
 
-#include <hardware/data.hpp>
 #include <string>
+
+#include "mujoco_simulation/hardware/data.hpp"
+#include "mujoco_simulation/hardware/hardware_interface.hpp"
 
 namespace mujoco_simulation {
 
@@ -31,13 +33,14 @@ class Imu : public HardwareInterface<ImuData, ImuCommand, ImuState> {
  public:
   Imu(const mjModel* model, mjData* data);
   ~Imu() override = default;
-  ;
 
   bool init(const ImuData& data) override;
   bool reset() override;
 
   bool write(const ImuCommand& command) override;
   bool read(ImuState& state) override;
+
+  const std::string& last_error() const override { return last_error_; }
 
  private:
   const mjModel* model_{nullptr};
@@ -48,6 +51,8 @@ class Imu : public HardwareInterface<ImuData, ImuCommand, ImuState> {
   int accelerometer_address_{-1};
 
   ImuData data_;
+  ImuState state_;
+  std::string last_error_;
 };
 
 }  // namespace mujoco_simulation

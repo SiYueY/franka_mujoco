@@ -2,55 +2,79 @@
 
 #include <mujoco/mujoco.h>
 
-#include <atomic>
-#include <hardware_interface/hardware_info.hpp>
-#include <memory>
-#include <rclcpp/node.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
 #include <string>
-#include <thread>
 #include <vector>
 
-#include "mujoco_simulation/mujoco_simulation.hpp"
+#include "mujoco_simulation/hardware/hardware_interface.hpp"
 
 namespace mujoco_simulation {
 
 struct LidarData {
-  std::string sensor_name;
-  std::string sensor_prefix;
+  std::string name;
   std::string frame_name;
-  std::string scan_topic;
-  double publish_rate = 5.0;
-  double angle_min = 0.0;
-  double angle_max = 0.0;
-  double angle_increment = 0.0;
-  double range_min = 0.0;
-  double range_max = 0.0;
-  std::vector<int> sensor_indices;
-  sensor_msgs::msg::LaserScan scan_msg;
-  rclcpp::Publisher<sensor_msgs::msg::LaserScan>::SharedPtr scan_publisher;
+  std::string sensor_prefix;
+  double angle_min{0.0};
+  double angle_max{0.0};
+  double angle_increment{0.0};
+  double range_min{0.0};
+  double range_max{0.0};
 };
 
-class MujocoLidars {
- public:
-  MujocoLidars(rclcpp::Node::SharedPtr node, MuJoCoSimulation* simulation);
-  ~MujocoLidars();
+struct LidarCommand {};
 
-  bool register_lidars(const hardware_interface::HardwareInfo& hardware_info,
-                       std::string* error_message);
-  void start();
-  void stop();
+// https://github.com/ros2/common_interfaces/blob/humble/sensor_msgs/msg/LaserScan.msg
+struct LaserScan {
+  double angle_min{0.0};
+  double angle_max{0.0};
+  double angle_increment{0.0};
+  double time_increment{0.0};
+  double scan_time{0.0};
+  double range_min{0.0};
+  double range_max{0.0};
+  std::vector<double> ranges;
+  std::vector<double> intensities;
+};
+
+// https://github.com/ros2/common_interfaces/blob/humble/sensor_msgs/msg/PointCloud.msg
+// struct PointCloud {
+//   std_msgs / Header header
+//   uint32_t height;
+//   uint32_t width;
+//   std::vector<PointField> fields;
+//   bool is_bigendian;
+//   uint32_t point_step;
+//   uint32_t row_step;
+//   std::vector<uint8_t> data;
+//   bool is_dense;
+// };
+struct LidarState {
+  LaserScan laser_scan;
+  // PointCloud point_cloud;
+};
+
+class Lidar : public HardwareInterface<LidarData, LidarCommand, LidarState> {
+ public:
+  Lidar(const mjModel* model, mjData* data);
+  ~Lidar() override = default;
+
+  bool init(const LidarData& data) override;
+  bool reset() override;
+  bool write(const LidarCommand& command) override;
+  bool read(LidarState& state) override;
+
+  const LidarData& data() const { return data_; }
+  const std::string& last_error() const override { return last_error_; }
 
  private:
-  void update_loop();
-  void update_once();
+  bool set_error(const std::string& message);
 
-  rclcpp::Node::SharedPtr node_;
-  MuJoCoSimulation* simulation_ = nullptr;
-  std::vector<LidarData> lidars_;
-  std::vector<mjtNum> sensor_data_;
-  std::thread publish_thread_;
-  std::atomic_bool publish_lidar_{false};
+  const mjModel* model_{nullptr};
+  mjData* mj_data_{nullptr};
+
+  LidarData data_;
+  LidarState state_;
+  std::vector<int> sensor_addresses_;
+  std::string last_error_;
 };
 
 }  // namespace mujoco_simulation

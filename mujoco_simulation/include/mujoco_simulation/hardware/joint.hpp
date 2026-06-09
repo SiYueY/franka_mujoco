@@ -2,95 +2,94 @@
 
 #include <mujoco/mujoco.h>
 
-#include <functional>
-#include <hardware_interface/handle.hpp>
-#include <hardware_interface/hardware_info.hpp>
 #include <string>
-#include <vector>
+
+#include "mujoco_simulation/hardware/hardware_interface.hpp"
 
 namespace mujoco_simulation {
 
-enum class MobileBaseType {
-  None,
-  DifferentialDrive,
-  Ackermann,
-  Tricycle,
-  Mecanum,
-  Omni,
-  CustomJointGroup,
+enum class JointType {
+  Unknown,
+  Hinge,
+  Slide,
+  Ball,
+  Free,
 };
 
-enum class JointRole {
-  Manipulator,
-  MobileTraction,
-  MobileSteering,
+enum class ActuatorType {
+  Unknown,
   Passive,
+  Motor,
+  Position,
+  Velocity,
+  Custom,
 };
 
-struct MobileBaseData {
-  MobileBaseType type = MobileBaseType::None;
-  std::string base_frame_id = "base_link";
-  std::string odom_frame_id = "odom";
-  std::string feedback_mode = "position";
-  std::vector<std::string> traction_joint_names;
-  std::vector<std::string> steering_joint_names;
-  std::vector<std::string> passive_joint_names;
+enum class CommandInterfaceType {
+  None,
+  Position,
+  Velocity,
+  Effort,
 };
 
 struct JointData {
   std::string name;
-  int joint_id = -1;
-  int actuator_id = -1;
-  int qpos_address = -1;
-  int dof_address = -1;
-  JointRole role = JointRole::Manipulator;
-
-  double position = 0.0;
-  double velocity = 0.0;
-  double effort = 0.0;
-
-  double position_command = 0.0;
-  double velocity_command = 0.0;
-  double effort_command = 0.0;
-
-  bool has_position_state = false;
-  bool has_velocity_state = false;
-  bool has_effort_state = false;
-  bool has_position_command = false;
-  bool has_velocity_command = false;
-  bool has_effort_command = false;
+  std::string actuator_name;
+  CommandInterfaceType command_mode{CommandInterfaceType::None};
 };
 
-class MujocoJoints {
+struct JointCommand {
+  std::string name;
+  double position{0.0};
+  double velocity{0.0};
+  double acceleration{0.0};
+  double effort{0.0};
+};
+
+struct JointState {
+  std::string name;
+  double position{0.0};
+  double velocity{0.0};
+  double effort{0.0};
+};
+
+class Joint : public HardwareInterface<JointData, JointCommand, JointState> {
  public:
-  using ParameterLookup = std::function<std::string(const std::string &, const std::string &)>;
+  Joint(const mjModel* model, mjData* data);
+  ~Joint() override = default;
 
-  bool configure(const hardware_interface::HardwareInfo &hardware_info, const mjModel &model,
-                 const ParameterLookup &parameter_lookup, std::string *error_message);
+  bool init(const JointData& data) override;
+  bool reset() override;
+  bool write(const JointCommand& command) override;
+  bool read(JointState& state) override;
 
-  std::vector<hardware_interface::StateInterface> export_state_interfaces(
-      const std::vector<hardware_interface::ComponentInfo> &joint_infos);
-
-  std::vector<hardware_interface::CommandInterface> export_command_interfaces(
-      const std::vector<hardware_interface::ComponentInfo> &joint_infos);
-
-  void read(const mjData &data);
-  void write(mjData &data) const;
-
-  const MobileBaseData &mobile_base() const { return mobile_base_; }
-  const std::vector<JointData> &bindings() const { return joints_; }
+  const JointData& data() const { return data_; }
+  JointType joint_type() const { return joint_type_; }
+  ActuatorType actuator_type() const { return actuator_type_; }
+  const std::string& last_error() const override { return last_error_; }
 
  private:
-  bool configure_mobile_base(const hardware_interface::HardwareInfo &hardware_info,
-                             const ParameterLookup &parameter_lookup, std::string *error_message);
-  bool bind_joints(const hardware_interface::HardwareInfo &hardware_info, const mjModel &model,
-                   const ParameterLookup &parameter_lookup, std::string *error_message);
-  int find_actuator_for_joint(const mjModel &model, const std::string &joint_name, int joint_id,
-                              const ParameterLookup &parameter_lookup) const;
-  JointRole role_for_joint(const std::string &joint_name) const;
+  bool set_error(const std::string& message);
+  int find_actuator_id() const;
+  JointType parse_joint_type(int mujoco_joint_type) const;
+  ActuatorType parse_actuator_type(int actuator_id) const;
+  bool validate_command_mode() const;
 
-  MobileBaseData mobile_base_;
-  std::vector<JointData> joints_;
+  const mjModel* model_{nullptr};
+  mjData* mj_data_{nullptr};
+
+  int joint_id_{-1};
+  int qpos_address_{-1};
+  int dof_address_{-1};
+  int actuator_id_{-1};
+  JointType joint_type_{JointType::Unknown};
+  ActuatorType actuator_type_{ActuatorType::Unknown};
+  CommandInterfaceType command_mode_{CommandInterfaceType::None};
+
+  JointData data_;
+  JointCommand command_;
+  JointState state_;
+  std::string last_error_;
 };
 
 }  // namespace mujoco_simulation

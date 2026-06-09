@@ -1,297 +1,205 @@
-#include <algorithm>
-#include <cctype>
-#include <hardware_interface/types/hardware_interface_type_values.hpp>
-#include <set>
-#include <sstream>
-#include <stdexcept>
-
-#include "mujoco_simulation/mujoco_joint.hpp"
+#include "mujoco_simulation/hardware/joint.hpp"
 
 namespace mujoco_simulation {
-namespace {
 
-std::string trim(std::string value) {
-  value.erase(value.begin(), std::find_if(value.begin(), value.end(),
-                                          [](unsigned char c) { return std::isspace(c) == 0; }));
-  value.erase(std::find_if(value.rbegin(), value.rend(),
-                           [](unsigned char c) { return std::isspace(c) == 0; })
-                  .base(),
-              value.end());
-  if (value.size() >= 2 && ((value.front() == '[' && value.back() == ']') ||
-                            (value.front() == '"' && value.back() == '"'))) {
-    value = value.substr(1, value.size() - 2);
-  }
-  return value;
-}
+Joint::Joint(const mjModel* model, mjData* data) : model_(model), mj_data_(data) {}
 
-std::vector<std::string> split_list(const std::string &value) {
-  std::vector<std::string> items;
-  std::stringstream stream(value);
-  std::string item;
-  while (std::getline(stream, item, ',')) {
-    item = trim(item);
-    if (!item.empty()) {
-      items.push_back(item);
-    }
-  }
-  return items;
-}
+bool Joint::init(const JointData& data) {
+  data_ = data;
+  command_ = {};
+  state_ = {};
+  last_error_.clear();
+  joint_id_ = -1;
+  qpos_address_ = -1;
+  dof_address_ = -1;
+  actuator_id_ = -1;
+  joint_type_ = JointType::Unknown;
+  actuator_type_ = ActuatorType::Unknown;
+  command_mode_ = CommandInterfaceType::None;
 
-MobileBaseType parse_mobile_base_type(const std::string &value) {
-  if (value.empty() || value == "none") {
-    return MobileBaseType::None;
+  if (model_ == nullptr || mj_data_ == nullptr) {
+    return set_error("MuJoCo model/data is not available for joint '" + data.name + "'.");
   }
-  if (value == "differential_drive") {
-    return MobileBaseType::DifferentialDrive;
-  }
-  if (value == "ackermann") {
-    return MobileBaseType::Ackermann;
-  }
-  if (value == "tricycle") {
-    return MobileBaseType::Tricycle;
-  }
-  if (value == "mecanum") {
-    return MobileBaseType::Mecanum;
-  }
-  if (value == "omni") {
-    return MobileBaseType::Omni;
-  }
-  if (value == "custom_joint_group") {
-    return MobileBaseType::CustomJointGroup;
-  }
-  throw std::invalid_argument("Unsupported mobile_base.type: " + value);
-}
 
-}  // namespace
+  joint_id_ = mj_name2id(model_, mjOBJ_JOINT, data.name.c_str());
+  if (joint_id_ < 0) {
+    return set_error("MuJoCo joint not found: " + data.name);
+  }
 
-bool MujocoJoints::configure(const hardware_interface::HardwareInfo &hardware_info,
-                             const mjModel &model, const ParameterLookup &parameter_lookup,
-                             std::string *error_message) {
-  if (!configure_mobile_base(hardware_info, parameter_lookup, error_message)) {
+  joint_type_ = parse_joint_type(model_->jnt_type[joint_id_]);
+  if (joint_type_ != JointType::Hinge && joint_type_ != JointType::Slide) {
+    return set_error("Joint '" + data.name +
+                     "' uses an unsupported MuJoCo joint type; current Joint abstraction only "
+                     "supports 1-DoF joints (hinge/slide).");
+  }
+
+  qpos_address_ = model_->jnt_qposadr[joint_id_];
+  dof_address_ = model_->jnt_dofadr[joint_id_];
+  if (qpos_address_ < 0 || dof_address_ < 0) {
+    return set_error("MuJoCo joint has invalid qpos/dof addresses: " + data.name);
+  }
+
+  command_mode_ = data.command_mode;
+
+  actuator_id_ = find_actuator_id();
+  actuator_type_ = parse_actuator_type(actuator_id_);
+  if (!validate_command_mode()) {
     return false;
   }
-  return bind_joints(hardware_info, model, parameter_lookup, error_message);
+
+  return reset();
 }
 
-std::vector<hardware_interface::StateInterface> MujocoJoints::export_state_interfaces(
-    const std::vector<hardware_interface::ComponentInfo> &joint_infos) {
-  std::vector<hardware_interface::StateInterface> interfaces;
-  for (auto &joint : joints_) {
-    const auto joint_it =
-        std::find_if(joint_infos.begin(), joint_infos.end(),
-                     [&joint](const auto &info_joint) { return info_joint.name == joint.name; });
-    if (joint_it == joint_infos.end()) {
+bool Joint::reset() {
+  last_error_.clear();
+  command_ = {};
+  return read(state_);
+}
+
+bool Joint::write(const JointCommand& command) {
+  last_error_.clear();
+  if (mj_data_ == nullptr || joint_id_ < 0) {
+    return set_error("Joint '" + data_.name + "' is not initialized.");
+  }
+
+  command_ = command;
+  if (command_mode_ == CommandInterfaceType::Position) {
+    if (actuator_type_ == ActuatorType::Passive || actuator_id_ < 0) {
+      return set_error("Position command requires an actuator for joint '" + data_.name + "'.");
+    }
+    mj_data_->ctrl[actuator_id_] = command.position;
+  } else if (command_mode_ == CommandInterfaceType::Velocity) {
+    if (actuator_type_ == ActuatorType::Passive || actuator_id_ < 0) {
+      return set_error("Velocity command requires an actuator for joint '" + data_.name + "'.");
+    }
+    mj_data_->ctrl[actuator_id_] = command.velocity;
+  } else if (command_mode_ == CommandInterfaceType::Effort) {
+    if (actuator_type_ == ActuatorType::Motor || actuator_type_ == ActuatorType::Custom) {
+      mj_data_->ctrl[actuator_id_] = command.effort;
+    } else if (actuator_type_ == ActuatorType::Passive && dof_address_ >= 0) {
+      mj_data_->qfrc_applied[dof_address_] = command.effort;
+    } else {
+      return set_error("Effort command is not supported by the actuator type for joint '" +
+                       data_.name + "'.");
+    }
+  }
+  return true;
+}
+
+bool Joint::read(JointState& state) {
+  last_error_.clear();
+  if (mj_data_ == nullptr || qpos_address_ < 0 || dof_address_ < 0) {
+    return set_error("Joint '" + data_.name + "' is not initialized.");
+  }
+
+  state_.position = mj_data_->qpos[qpos_address_];
+  state_.velocity = mj_data_->qvel[dof_address_];
+  state_.effort = mj_data_->qfrc_actuator[dof_address_] + mj_data_->qfrc_applied[dof_address_];
+  state = state_;
+  return true;
+}
+
+bool Joint::set_error(const std::string& message) {
+  last_error_ = message;
+  return false;
+}
+
+int Joint::find_actuator_id() const {
+  if (model_ == nullptr) {
+    return -1;
+  }
+
+  if (!data_.actuator_name.empty()) {
+    return mj_name2id(model_, mjOBJ_ACTUATOR, data_.actuator_name.c_str());
+  }
+
+  for (int actuator_id = 0; actuator_id < model_->nu; ++actuator_id) {
+    if (model_->actuator_trntype[actuator_id] != mjTRN_JOINT) {
       continue;
     }
-    for (const auto &state_interface : joint_it->state_interfaces) {
-      if (state_interface.name == hardware_interface::HW_IF_POSITION) {
-        interfaces.emplace_back(joint.name, state_interface.name, &joint.position);
-      } else if (state_interface.name == hardware_interface::HW_IF_VELOCITY) {
-        interfaces.emplace_back(joint.name, state_interface.name, &joint.velocity);
-      } else if (state_interface.name == hardware_interface::HW_IF_EFFORT) {
-        interfaces.emplace_back(joint.name, state_interface.name, &joint.effort);
-      }
+    if (model_->actuator_trnid[2 * actuator_id] == joint_id_) {
+      return actuator_id;
     }
   }
-  return interfaces;
+  return -1;
 }
 
-std::vector<hardware_interface::CommandInterface> MujocoJoints::export_command_interfaces(
-    const std::vector<hardware_interface::ComponentInfo> &joint_infos) {
-  std::vector<hardware_interface::CommandInterface> interfaces;
-  for (auto &joint : joints_) {
-    const auto joint_it =
-        std::find_if(joint_infos.begin(), joint_infos.end(),
-                     [&joint](const auto &info_joint) { return info_joint.name == joint.name; });
-    if (joint_it == joint_infos.end()) {
-      continue;
-    }
-
-    for (const auto &command_interface : joint_it->command_interfaces) {
-      if (command_interface.name == hardware_interface::HW_IF_POSITION) {
-        interfaces.emplace_back(joint.name, command_interface.name, &joint.position_command);
-      } else if (command_interface.name == hardware_interface::HW_IF_VELOCITY) {
-        interfaces.emplace_back(joint.name, command_interface.name, &joint.velocity_command);
-      } else if (command_interface.name == hardware_interface::HW_IF_EFFORT) {
-        interfaces.emplace_back(joint.name, command_interface.name, &joint.effort_command);
-      }
-    }
-  }
-  return interfaces;
-}
-
-void MujocoJoints::read(const mjData &data) {
-  for (auto &joint : joints_) {
-    if (joint.qpos_address >= 0) {
-      joint.position = data.qpos[joint.qpos_address];
-    }
-    if (joint.dof_address >= 0) {
-      joint.velocity = data.qvel[joint.dof_address];
-      joint.effort = data.qfrc_actuator[joint.dof_address] + data.qfrc_applied[joint.dof_address];
-    }
-  }
-}
-
-void MujocoJoints::write(mjData &data) const {
-  for (const auto &joint : joints_) {
-    if (joint.actuator_id >= 0) {
-      if (joint.has_position_command) {
-        data.ctrl[joint.actuator_id] = joint.position_command;
-      } else if (joint.has_velocity_command) {
-        data.ctrl[joint.actuator_id] = joint.velocity_command;
-      } else if (joint.has_effort_command) {
-        data.ctrl[joint.actuator_id] = joint.effort_command;
-      }
-    } else if (joint.has_effort_command && joint.dof_address >= 0) {
-      data.qfrc_applied[joint.dof_address] = joint.effort_command;
-    }
-  }
-}
-
-bool MujocoJoints::configure_mobile_base(const hardware_interface::HardwareInfo &,
-                                         const ParameterLookup &parameter_lookup,
-                                         std::string *error_message) {
-  mobile_base_ = {};
-  mobile_base_.base_frame_id = parameter_lookup("mobile_base.base_frame_id", "base_link");
-  mobile_base_.odom_frame_id = parameter_lookup("mobile_base.odom_frame_id", "odom");
-  mobile_base_.feedback_mode = parameter_lookup("mobile_base.feedback_mode", "position");
-  mobile_base_.traction_joint_names =
-      split_list(parameter_lookup("mobile_base.traction_joints", ""));
-  mobile_base_.steering_joint_names =
-      split_list(parameter_lookup("mobile_base.steering_joints", ""));
-  mobile_base_.passive_joint_names = split_list(parameter_lookup("mobile_base.passive_joints", ""));
-  mobile_base_.type = parse_mobile_base_type(parameter_lookup("mobile_base.type", "none"));
-
-  if (mobile_base_.type == MobileBaseType::None) {
+bool Joint::validate_command_mode() const {
+  auto* self = const_cast<Joint*>(this);
+  if (command_mode_ == CommandInterfaceType::None) {
     return true;
   }
-  if (mobile_base_.type != MobileBaseType::DifferentialDrive &&
-      mobile_base_.traction_joint_names.empty()) {
-    if (error_message != nullptr) {
-      *error_message =
-          "mobile_base.traction_joints must not be empty when mobile_base.type is configured.";
-    }
-    return false;
-  }
-  if ((mobile_base_.type == MobileBaseType::Ackermann ||
-       mobile_base_.type == MobileBaseType::Tricycle ||
-       mobile_base_.type == MobileBaseType::CustomJointGroup) &&
-      mobile_base_.steering_joint_names.empty()) {
-    if (error_message != nullptr) {
-      *error_message = "mobile_base.steering_joints must not be empty for steering mobile bases.";
-    }
-    return false;
-  }
-  return true;
-}
 
-bool MujocoJoints::bind_joints(const hardware_interface::HardwareInfo &hardware_info,
-                               const mjModel &model, const ParameterLookup &parameter_lookup,
-                               std::string *error_message) {
-  joints_.clear();
-  for (const auto &info_joint : hardware_info.joints) {
-    JointData binding;
-    binding.name = info_joint.name;
-    binding.role = role_for_joint(binding.name);
-    binding.joint_id = mj_name2id(&model, mjOBJ_JOINT, binding.name.c_str());
-    if (binding.joint_id < 0) {
-      *error_message = "MuJoCo joint not found: " + binding.name;
-      return false;
+  if (command_mode_ == CommandInterfaceType::Position) {
+    if (actuator_type_ == ActuatorType::Passive) {
+      return self->set_error("Position command is not supported for passive joint '" + data_.name +
+                             "'.");
     }
-
-    binding.qpos_address = model.jnt_qposadr[binding.joint_id];
-    binding.dof_address = model.jnt_dofadr[binding.joint_id];
-
-    for (const auto &state_interface : info_joint.state_interfaces) {
-      if (state_interface.name == hardware_interface::HW_IF_POSITION) {
-        binding.has_position_state = true;
-      } else if (state_interface.name == hardware_interface::HW_IF_VELOCITY) {
-        binding.has_velocity_state = true;
-      } else if (state_interface.name == hardware_interface::HW_IF_EFFORT) {
-        binding.has_effort_state = true;
-      }
-    }
-
-    for (const auto &command_interface : info_joint.command_interfaces) {
-      if (command_interface.name == hardware_interface::HW_IF_POSITION) {
-        binding.has_position_command = true;
-      } else if (command_interface.name == hardware_interface::HW_IF_VELOCITY) {
-        binding.has_velocity_command = true;
-      } else if (command_interface.name == hardware_interface::HW_IF_EFFORT) {
-        binding.has_effort_command = true;
-      }
-    }
-
-    binding.actuator_id =
-        find_actuator_for_joint(model, binding.name, binding.joint_id, parameter_lookup);
-    if ((binding.has_position_command || binding.has_velocity_command ||
-         binding.has_effort_command) &&
-        binding.actuator_id < 0 && !binding.has_effort_command) {
-      *error_message = "MuJoCo actuator not found for joint: " + binding.name;
-      return false;
-    }
-
-    joints_.push_back(binding);
+    return true;
   }
 
-  if (mobile_base_.type != MobileBaseType::None) {
-    std::set<std::string> available_names;
-    for (const auto &joint : joints_) {
-      available_names.insert(joint.name);
+  if (command_mode_ == CommandInterfaceType::Velocity) {
+    if (actuator_type_ == ActuatorType::Passive) {
+      return self->set_error("Velocity command is not supported for passive joint '" + data_.name +
+                             "'.");
     }
-    for (const auto &name : mobile_base_.traction_joint_names) {
-      if (available_names.count(name) == 0U) {
-        *error_message =
-            "Configured mobile base traction joint not found in ros2_control joints: " + name;
-        return false;
-      }
+    if (actuator_type_ == ActuatorType::Position) {
+      return self->set_error("Velocity command is not supported for position actuator on joint '" +
+                             data_.name + "'.");
     }
-    for (const auto &name : mobile_base_.steering_joint_names) {
-      if (available_names.count(name) == 0U) {
-        *error_message =
-            "Configured mobile base steering joint not found in ros2_control joints: " + name;
-        return false;
-      }
+    return true;
+  }
+
+  if (command_mode_ == CommandInterfaceType::Effort) {
+    if (actuator_type_ == ActuatorType::Position || actuator_type_ == ActuatorType::Velocity) {
+      return self->set_error(
+          "Effort command is not supported for position/velocity actuator on joint '" + data_.name +
+          "'.");
     }
+    return true;
   }
 
   return true;
 }
 
-int MujocoJoints::find_actuator_for_joint(const mjModel &model, const std::string &joint_name,
-                                          int joint_id,
-                                          const ParameterLookup &parameter_lookup) const {
-  auto actuator_param = std::string("mujoco_actuator_name.");
-  actuator_param += joint_name;
-  const std::string explicit_name = parameter_lookup(actuator_param, "");
-
-  if (!explicit_name.empty()) {
-    return mj_name2id(&model, mjOBJ_ACTUATOR, explicit_name.c_str());
+JointType Joint::parse_joint_type(int mujoco_joint_type) const {
+  if (mujoco_joint_type == mjJNT_HINGE) {
+    return JointType::Hinge;
   }
-
-  for (int i = 0; i < model.nu; ++i) {
-    if (model.actuator_trntype[i] == mjTRN_JOINT && model.actuator_trnid[2 * i] == joint_id) {
-      return i;
-    }
+  if (mujoco_joint_type == mjJNT_SLIDE) {
+    return JointType::Slide;
   }
-
-  return mj_name2id(&model, mjOBJ_ACTUATOR, joint_name.c_str());
+  if (mujoco_joint_type == mjJNT_BALL) {
+    return JointType::Ball;
+  }
+  if (mujoco_joint_type == mjJNT_FREE) {
+    return JointType::Free;
+  }
+  return JointType::Unknown;
 }
 
-JointRole MujocoJoints::role_for_joint(const std::string &joint_name) const {
-  if (std::find(mobile_base_.traction_joint_names.begin(), mobile_base_.traction_joint_names.end(),
-                joint_name) != mobile_base_.traction_joint_names.end()) {
-    return JointRole::MobileTraction;
+ActuatorType Joint::parse_actuator_type(int actuator_id) const {
+  if (model_ == nullptr) {
+    return ActuatorType::Unknown;
   }
-  if (std::find(mobile_base_.steering_joint_names.begin(), mobile_base_.steering_joint_names.end(),
-                joint_name) != mobile_base_.steering_joint_names.end()) {
-    return JointRole::MobileSteering;
+  if (actuator_id < 0) {
+    return ActuatorType::Passive;
   }
-  if (std::find(mobile_base_.passive_joint_names.begin(), mobile_base_.passive_joint_names.end(),
-                joint_name) != mobile_base_.passive_joint_names.end()) {
-    return JointRole::Passive;
+
+  const int bias_type = model_->actuator_biastype[actuator_id];
+  constexpr int kBiasParamCount = 10;
+  const mjtNum* biasprm = model_->actuator_biasprm + actuator_id * kBiasParamCount;
+
+  if (bias_type == mjBIAS_NONE) {
+    return ActuatorType::Motor;
   }
-  return JointRole::Manipulator;
+  if (bias_type == mjBIAS_AFFINE && biasprm[1] != 0) {
+    return ActuatorType::Position;
+  }
+  if (bias_type == mjBIAS_AFFINE && biasprm[1] == 0 && biasprm[2] != 0) {
+    return ActuatorType::Velocity;
+  }
+  return ActuatorType::Custom;
 }
 
 }  // namespace mujoco_simulation

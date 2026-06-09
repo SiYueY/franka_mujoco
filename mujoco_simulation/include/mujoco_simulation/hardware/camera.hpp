@@ -5,9 +5,11 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
-#include <hardware/data.hpp>
 #include <string>
 #include <vector>
+
+#include "mujoco_simulation/hardware/data.hpp"
+#include "mujoco_simulation/hardware/hardware_interface.hpp"
 
 namespace mujoco_simulation {
 
@@ -66,6 +68,7 @@ class Camera : public HardwareInterface<CameraData, CameraCommand, CameraState> 
   bool reset() override;
   bool write(const CameraCommand&) override;
   bool read(CameraState& state) override;
+  const std::string& last_error() const override { return last_error_; }
 
  private:
   const mjModel* model_{nullptr};
@@ -82,6 +85,8 @@ class Camera : public HardwareInterface<CameraData, CameraCommand, CameraState> 
 
   std::vector<uint8_t> image_buffer_;
   std::vector<float> depth_image_buffer_;
+  CameraState state_;
+  std::string last_error_;
 };
 
 }  // namespace mujoco_simulation

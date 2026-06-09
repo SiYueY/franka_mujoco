@@ -1,19 +1,17 @@
 #include "mujoco_simulation/mujoco_simulation.hpp"
 
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 
-#include "glfw_adapter.h"
-#include "simulate.h"
+#include "mujoco_simulation/viewer/viewer.hpp"
 
 namespace mujoco_simulation {
 namespace {
 constexpr int kLoadErrorLength = 1024;
-
-void delete_simulate(mujoco::Simulate *simulate) { delete simulate; }
 }  // namespace
 
-MuJoCoSimulation::MuJoCoSimulation() : simulate_(nullptr, delete_simulate) {}
+MuJoCoSimulation::MuJoCoSimulation() = default;
 
 MuJoCoSimulation::~MuJoCoSimulation() {
   stop();
@@ -62,17 +60,12 @@ void MuJoCoSimulation::start() {
 }
 
 void MuJoCoSimulation::stop() {
-  if (!running_.exchange(false)) {
-    return;
-  }
+  running_.store(false);
   if (physics_thread_.joinable()) {
     physics_thread_.join();
   }
-  if (simulate_ != nullptr) {
-    simulate_->exitrequest.store(true);
-  }
-  if (viewer_thread_.joinable()) {
-    viewer_thread_.join();
+  if (viewer_ != nullptr) {
+    viewer_->stop();
   }
 }
 
@@ -126,17 +119,15 @@ bool MuJoCoSimulation::step(uint32_t steps, std::string *error_message) {
     return false;
   }
 
-  std::unique_lock<std::recursive_mutex> viewer_lock;
-  if (simulate_ != nullptr) {
-    viewer_lock = std::unique_lock<std::recursive_mutex>(simulate_->mtx);
-  }
-
   for (uint32_t i = 0; i < steps; ++i) {
     mj_step(model_, data_);
     ++step_count_;
   }
-  if (simulate_ != nullptr) {
-    simulate_->Sync();
+  if (viewer_ != nullptr && !viewer_->sync()) {
+    if (error_message != nullptr) {
+      *error_message = "Failed to sync MuJoCo viewer after stepping.";
+    }
+    return false;
   }
   return true;
 }
@@ -248,22 +239,19 @@ bool MuJoCoSimulation::load_model(const std::string &model_path, std::string *er
 }
 
 bool MuJoCoSimulation::start_viewer(std::string *error_message) {
-  try {
-    mjv_defaultCamera(&camera_);
-    mjv_defaultOption(&visual_options_);
-    mjv_defaultPerturb(&perturb_);
-    simulate_.reset(new mujoco::Simulate(std::make_unique<mujoco::GlfwAdapter>(), &camera_,
-                                         &visual_options_, &perturb_, false));
-
-    simulate_->Load(model_, data_, config_.model_path.c_str());
-    viewer_thread_ = std::thread([this]() { simulate_->RenderLoop(); });
-  } catch (const std::exception &exc) {
-    if (error_message != nullptr) {
-      *error_message = std::string("Failed to start MuJoCo viewer: ") + exc.what();
-    }
+  viewer_ = std::make_unique<Viewer>();
+  if (!viewer_->initialize(error_message)) {
+    viewer_.reset();
     return false;
   }
-
+  if (!viewer_->load(model_, data_, config_.model_path, error_message)) {
+    viewer_.reset();
+    return false;
+  }
+  if (!viewer_->start(error_message)) {
+    viewer_.reset();
+    return false;
+  }
   return true;
 }
 

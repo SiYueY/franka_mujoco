@@ -1,3 +1,5 @@
+#pragma once
+
 namespace mujoco_simulation {
 
 template <typename HardwareData, typename Command, typename State>
@@ -15,6 +17,8 @@ class HardwareInterface {
 
   virtual bool write(const Command& command) = 0;
   virtual bool read(State& state) = 0;
+
+  virtual const std::string& last_error() const = 0;
 };
 
 }  // namespace mujoco_simulation
