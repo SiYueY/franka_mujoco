@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mujoco_ros2_bridge.robocasa.exceptions import RoboCasaSceneConfigError
+from .exceptions import RoboCasaSceneConfigError
 
 
 @dataclass(frozen=True)

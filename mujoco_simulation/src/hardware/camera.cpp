@@ -8,7 +8,7 @@ namespace mujoco_simulation {
 Camera::Camera(const mjModel* model, mjData* data, mjvScene* scene, mjrContext* render_context)
     : model_(model), mj_data_(data), scene_(scene), render_context_(render_context) {}
 
-bool Camera::init(const CameraData& data) {
+bool Camera::init(const CameraSpec& data) {
   data_ = data;
   state_ = {};
   last_error_.clear();

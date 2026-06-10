@@ -5,9 +5,9 @@ import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 
-from mujoco_ros2_bridge.robocasa.exceptions import RoboCasaMjcfAdaptationError
-from mujoco_ros2_bridge.robocasa.mjcf_adapter import adapt_mjcf
-from mujoco_ros2_bridge.robocasa.scene_data import ObjectPlacement, SpawnPose
+from mujoco_simulation.robocasa.exceptions import RoboCasaMjcfAdaptationError
+from mujoco_simulation.robocasa.mjcf_adapter import adapt_mjcf
+from mujoco_simulation.robocasa.scene_data import ObjectPlacement, SpawnPose
 
 
 RAW_XML = """

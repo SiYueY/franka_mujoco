@@ -1,36 +1,38 @@
 # franka_mujoco Development Guide
 
-`franka_mujoco` is the repository name. The reusable MuJoCo/ROS 2 integration code lives in the ROS 2 package `mujoco_ros2_bridge`.
+`franka_mujoco` is the repository name. The reusable MuJoCo backend lives in `mujoco_simulation`. The ROS 2 `ros2_control` hardware plugin lives in `franka_hardware`.
 
 ## Package Boundaries
 
 | Package | Responsibility |
 | --- | --- |
-| `mujoco_ros2_bridge` | Generic MuJoCo runtime, ROS 2 node, `ros2_control` hardware plugin, official MuJoCo viewer integration, and RoboCasa MJCF generation helpers |
-| `mujoco_ros2_bridge_msgs` | Lightweight service interfaces shared by runtime nodes and tests |
+| `mujoco_simulation` | MuJoCo backend runtime, device abstractions, official viewer integration, and RoboCasa MJCF generation helpers |
+| `franka_hardware` | Standard `hardware_interface::SystemInterface` plugin that adapts `mujoco_simulation` to `ros2_control` |
 
-Do not add MuJoCo runtime code under a `franka_mujoco` Python package. Robot-specific bringup, controller configs, MoveIt, Nav2, or Franka-specific wrappers should stay outside the generic bridge.
+Do not add ROS bridge nodes, custom simulation services, or robot-specific control logic under `mujoco_simulation`. Robot-specific bringup, controller configs, MoveIt, Nav2, and hardware-specific wrappers stay outside the backend library.
 
 ## Runtime Architecture
 
-The C++ runtime follows the `mujoco_ros2_control` architecture:
+The control chain is:
 
-- `MuJoCoSimulation` owns `mjModel`, `mjData`, the physics thread, pause/reset/step behavior, and `/clock`.
-- `MujocoSystemInterface` implements `hardware_interface::SystemInterface` and maps ROS 2 control joint interfaces to MuJoCo joints and actuators.
-- `mujoco_ros2_bridge_node` runs `controller_manager` and the control update loop.
-- Services are provided under `/mujoco/*` through `mujoco_ros2_bridge_msgs`.
+`MoveIt 2 / application`
+→ `FollowJointTrajectory`
+→ `JointTrajectoryController`
+→ `ros2_control`
+→ `franka_hardware::FrankaHardwareInterface`
+→ `mujoco_simulation::MuJoCoSimulation`
 
-The bridge is generic. It should not assume a Franka, Stretch, Unitree, or RoboCasa robot model.
+`MuJoCoSimulation` owns `mjModel`, `mjData`, the physics thread, viewer lifecycle, and the public joint / IMU access API. `franka_hardware` consumes only `mujoco_simulation/mujoco_simulation.hpp`; it must not reach into backend internals such as `HardwareManager`.
 
 ## Viewer
 
-`mujoco_ros2_bridge` vendors the official MuJoCo `mujoco/simulate` source under:
+`mujoco_simulation` vendors the official MuJoCo `mujoco/simulate` source under:
 
 ```text
-mujoco_ros2_bridge/third_party/mujoco_simulate/
+mujoco_simulation/src/viewer/simulate/
 ```
 
-The vendored files are copied from the repository's `mujoco/simulate` directory and should not be edited for project-specific behavior. Custom logic belongs in wrapper code inside `mujoco_ros2_bridge`.
+The vendored files are copied from the repository's `mujoco/simulate` directory and should not be edited for project-specific behavior. Custom logic belongs in wrapper code inside `mujoco_simulation`.
 
 The internal CMake target is:
 
@@ -43,30 +45,25 @@ Runtime mode is selected with `render_mode`:
 - `headless`: no viewer window is started.
 - `viewer`: uses the official MuJoCo simulate UI integration.
 
-## ROS 2 Interfaces
+`franka_hardware` currently supports:
 
-Service definitions live in `mujoco_ros2_bridge_msgs`:
+- joint command/state interfaces
+- IMU state interfaces
+- camera topic publishing via `sensor_msgs/Image` and `sensor_msgs/CameraInfo`
+- lidar topic publishing via `sensor_msgs/LaserScan`
 
-| Service | Purpose |
-| --- | --- |
-| `SetPause.srv` | Pause or resume physics |
-| `ResetWorld.srv` | Reset the model, optionally to a keyframe |
-| `StepSimulation.srv` | Advance a fixed number of steps |
+It does not provide custom ROS services, `/clock`, pause/reset/step APIs, or a `controller_manager` host node.
 
-Runtime service names:
+Current constraint:
 
-```text
-/mujoco/set_pause
-/mujoco/reset_world
-/mujoco/step_simulation
-```
+- camera publishing requires `render_mode:=viewer`, because the camera path still depends on MuJoCo's viewer render context.
 
 ## RoboCasa
 
 RoboCasa Python helpers are installed as:
 
 ```python
-from mujoco_ros2_bridge.robocasa import SceneConfig, SceneGenerator
+from mujoco_simulation.robocasa import SceneConfig, SceneGenerator
 ```
 
 This package generates and adapts MJCF XML. It does not run the MuJoCo simulation and does not provide ROS 2 runtime bindings.
@@ -74,7 +71,7 @@ This package generates and adapts MJCF XML. It does not run the MuJoCo simulatio
 The old import path is intentionally removed:
 
 ```python
-from franka_mujoco.robocasa import SceneGenerator  # unsupported
+from mujoco_ros2_bridge.robocasa import SceneGenerator  # unsupported
 ```
 
 ## Build And Test
@@ -82,21 +79,21 @@ from franka_mujoco.robocasa import SceneGenerator  # unsupported
 Python-only validation:
 
 ```bash
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=mujoco_ros2_bridge python3 -m unittest discover -s tests
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=mujoco_ros2_bridge python3 -m compileall -q mujoco_ros2_bridge/mujoco_ros2_bridge tests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m unittest discover -s tests
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. python3 -m compileall -q mujoco_simulation tests
 ```
 
 ROS 2 validation:
 
 ```bash
-colcon build --packages-select mujoco_ros2_bridge mujoco_ros2_bridge_msgs
-colcon test --packages-select mujoco_ros2_bridge mujoco_ros2_bridge_msgs --event-handlers console_direct+
+colcon build --packages-select mujoco_simulation franka_hardware
+colcon test --packages-select mujoco_simulation --event-handlers console_direct+
 ```
 
 ## Development Rules
 
-- Keep runtime code generic and model-agnostic.
-- Use standard `ros2_control` controllers instead of robot-specific action/topic shims in the bridge.
-- Keep message definitions in `mujoco_ros2_bridge_msgs`.
-- Keep RoboCasa XML generation in `mujoco_ros2_bridge.robocasa`.
+- Keep `mujoco_simulation` generic and model-agnostic.
+- Keep `franka_hardware` as a standard `SystemInterface`, not a bridge node.
+- Use standard `ros2_control` controllers instead of custom action/topic shims.
+- Keep RoboCasa XML generation in `mujoco_simulation.robocasa`.
 - Keep vendored MuJoCo simulate source synchronized by copying from `mujoco/simulate`; do not hand-edit it.

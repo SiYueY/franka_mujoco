@@ -25,10 +25,11 @@ int parse_beam_index(const std::string& sensor_name, const std::string& prefix) 
 
 Lidar::Lidar(const mjModel* model, mjData* data) : model_(model), mj_data_(data) {}
 
-bool Lidar::init(const LidarData& data) {
+bool Lidar::init(const LidarInfo& data) {
   data_ = data;
   state_ = {};
   sensor_addresses_.clear();
+  last_read_time_ = 0.0;
   last_error_.clear();
 
   if (model_ == nullptr || mj_data_ == nullptr) {
@@ -69,19 +70,26 @@ bool Lidar::init(const LidarData& data) {
     return set_error("Lidar '" + data.name + "' is missing one or more rangefinder beams.");
   }
 
-  state_.frame_id = data.frame_name;
-  state_.angle_min = data.angle_min;
-  state_.angle_max = data.angle_max;
-  state_.angle_increment = data.angle_increment;
-  state_.range_min = data.range_min;
-  state_.range_max = data.range_max;
-  state_.ranges.assign(sensor_addresses_.size(), -1.0);
+  state_.laser_scan.frame_id = data.frame_name;
+  state_.laser_scan.angle_min = data.angle_min;
+  state_.laser_scan.angle_max = data.angle_max;
+  state_.laser_scan.angle_increment = data.angle_increment;
+  state_.laser_scan.range_min = data.range_min;
+  state_.laser_scan.range_max = data.range_max;
+  state_.laser_scan.time_increment = 0.0;
+  state_.laser_scan.scan_time = 0.0;
+  state_.laser_scan.ranges.assign(sensor_addresses_.size(), -1.0);
+  state_.laser_scan.intensities.assign(sensor_addresses_.size(), 0.0);
   return true;
 }
 
 bool Lidar::reset() {
   last_error_.clear();
-  std::fill(state_.ranges.begin(), state_.ranges.end(), -1.0);
+  last_read_time_ = 0.0;
+  std::fill(state_.laser_scan.ranges.begin(), state_.laser_scan.ranges.end(), -1.0);
+  std::fill(state_.laser_scan.intensities.begin(), state_.laser_scan.intensities.end(), 0.0);
+  state_.laser_scan.time_increment = 0.0;
+  state_.laser_scan.scan_time = 0.0;
   return true;
 }
 
@@ -96,10 +104,19 @@ bool Lidar::read(LidarState& state) {
     return set_error("Lidar '" + data_.name + "' is not initialized.");
   }
 
+  const double current_time = mj_data_->time;
+  const double scan_time = last_read_time_ == 0.0 ? 0.0 : current_time - last_read_time_;
+  last_read_time_ = current_time;
+  state_.laser_scan.scan_time = scan_time;
+  state_.laser_scan.time_increment =
+      sensor_addresses_.empty() ? 0.0 : scan_time / static_cast<double>(sensor_addresses_.size());
+
   for (std::size_t i = 0; i < sensor_addresses_.size(); ++i) {
     const int address = sensor_addresses_[i];
     const double range = mj_data_->sensordata[address];
-    state_.ranges[i] = (range < data_.range_min || range > data_.range_max) ? -1.0 : range;
+    state_.laser_scan.ranges[i] =
+        (range < data_.range_min || range > data_.range_max) ? -1.0 : range;
+    state_.laser_scan.intensities[i] = 0.0;
   }
 
   state = state_;

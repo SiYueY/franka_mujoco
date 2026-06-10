@@ -107,7 +107,7 @@
 - `JointType` 表示关节的运动学类型
 - `ActuatorType` 表示驱动器的控制语义
 
-`JointData` 中的 `CommandInterfaceType` 则表示当前上层希望用哪种命令接口控制该关节：
+`JointInfo` 中的 `CommandInterfaceType` 则表示当前上层希望用哪种命令接口控制该关节：
 
 - `None`
 - `Position`

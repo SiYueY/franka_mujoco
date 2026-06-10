@@ -19,7 +19,7 @@ bool copy_sensor_vector(const mjData* data, int address, double* dest, int count
 
 Imu::Imu(const mjModel* model, mjData* data) : model_(model), mj_data_(data) {}
 
-bool Imu::init(const ImuData& data) {
+bool Imu::init(const ImuInfo& data) {
   data_ = data;
   last_error_.clear();
 

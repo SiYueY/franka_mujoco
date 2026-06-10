@@ -19,21 +19,21 @@ class HardwareManager {
   HardwareManager(const mjModel* model, mjData* data, mjvScene* scene = nullptr,
                   mjrContext* render_context = nullptr);
 
-  bool register_joint(const JointData& data);
+  bool register_joint(const JointInfo& data);
   bool unregister_joint(const std::string& name);
   bool write_joint(const std::string& name, const JointCommand& command);
   bool read_joint(const std::string& name, JointState& state);
   std::unordered_map<std::string, JointState> read_joint_states();
 
-  bool register_imu(const ImuData& data);
+  bool register_imu(const ImuInfo& data);
   bool unregister_imu(const std::string& name);
   bool read_imu(const std::string& name, ImuState& state);
 
-  bool register_camera(const CameraData& data);
+  bool register_camera(const CameraSpec& data);
   bool unregister_camera(const std::string& name);
   bool read_camera(const std::string& name, CameraState& state);
 
-  bool register_lidar(const LidarData& data);
+  bool register_lidar(const LidarInfo& data);
   bool unregister_lidar(const std::string& name);
   bool read_lidar(const std::string& name, LidarState& state);
   std::unordered_map<std::string, LidarState> read_lidar_states();

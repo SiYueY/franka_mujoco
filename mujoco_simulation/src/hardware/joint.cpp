@@ -4,7 +4,7 @@ namespace mujoco_simulation {
 
 Joint::Joint(const mjModel* model, mjData* data) : model_(model), mj_data_(data) {}
 
-bool Joint::init(const JointData& data) {
+bool Joint::init(const JointInfo& data) {
   data_ = data;
   command_ = {};
   state_ = {};

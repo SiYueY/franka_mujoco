@@ -9,7 +9,7 @@
 
 namespace mujoco_simulation {
 
-struct ImuData {
+struct ImuInfo {
   std::string name;
 
   std::string framequat_sensor_name;
@@ -22,19 +22,19 @@ struct ImuCommand {};
 // https://github.com/ros2/common_interfaces/blob/humble/sensor_msgs/msg/Imu.msg
 struct ImuState {
   Quaterniond orientation{0.0, 0.0, 0.0, 1.0};
-  // Vector9d orientation_covariance;  // Row major about x, y, z axes
+  Vector9d orientation_covariance{};
   Vector3d angular_velocity{0.0, 0.0, 0.0};
-  // Vector9d angular_velocity_covariance; // Row major about x, y, z axes
+  Vector9d angular_velocity_covariance{};
   Vector3d linear_acceleration{0.0, 0.0, 0.0};
-  // Vector9d linear_acceleration_covariance;  // Row major x, y z
+  Vector9d linear_acceleration_covariance{};
 };
 
-class Imu : public HardwareInterface<ImuData, ImuCommand, ImuState> {
+class Imu : public HardwareInterface<ImuInfo, ImuCommand, ImuState> {
  public:
   Imu(const mjModel* model, mjData* data);
   ~Imu() override = default;
 
-  bool init(const ImuData& data) override;
+  bool init(const ImuInfo& data) override;
   bool reset() override;
 
   bool write(const ImuCommand& command) override;
@@ -50,7 +50,7 @@ class Imu : public HardwareInterface<ImuData, ImuCommand, ImuState> {
   int gyro_address_{-1};
   int accelerometer_address_{-1};
 
-  ImuData data_;
+  ImuInfo data_;
   ImuState state_;
   std::string last_error_;
 };

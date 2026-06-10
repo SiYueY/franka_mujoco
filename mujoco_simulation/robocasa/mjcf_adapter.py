@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Iterable
 import xml.etree.ElementTree as ET
 
-from mujoco_ros2_bridge.robocasa.exceptions import RoboCasaMjcfAdaptationError
-from mujoco_ros2_bridge.robocasa.scene_data import ObjectPlacement, SpawnPose
+from .exceptions import RoboCasaMjcfAdaptationError
+from .scene_data import ObjectPlacement, SpawnPose
 
 
 RUNTIME_ELEMENT_TAGS = ("actuator", "sensor", "option")

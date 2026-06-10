@@ -40,7 +40,7 @@ HardwareManager::HardwareManager(const mjModel* model, mjData* data, mjvScene* s
                                  mjrContext* render_context)
     : model_(model), mj_data_(data), scene_(scene), render_context_(render_context) {}
 
-bool HardwareManager::register_joint(const JointData& data) {
+bool HardwareManager::register_joint(const JointInfo& data) {
   if (data.name.empty()) {
     return set_error("Joint name must not be empty.");
   }
@@ -57,7 +57,7 @@ bool HardwareManager::register_joint(const JointData& data) {
   return true;
 }
 
-bool HardwareManager::register_imu(const ImuData& data) {
+bool HardwareManager::register_imu(const ImuInfo& data) {
   if (data.name.empty()) {
     return set_error("IMU name must not be empty.");
   }
@@ -74,7 +74,7 @@ bool HardwareManager::register_imu(const ImuData& data) {
   return true;
 }
 
-bool HardwareManager::register_camera(const CameraData& data) {
+bool HardwareManager::register_camera(const CameraSpec& data) {
   if (data.name.empty()) {
     return set_error("Camera name must not be empty.");
   }
@@ -91,7 +91,7 @@ bool HardwareManager::register_camera(const CameraData& data) {
   return true;
 }
 
-bool HardwareManager::register_lidar(const LidarData& data) {
+bool HardwareManager::register_lidar(const LidarInfo& data) {
   if (data.name.empty()) {
     return set_error("Lidar name must not be empty.");
   }

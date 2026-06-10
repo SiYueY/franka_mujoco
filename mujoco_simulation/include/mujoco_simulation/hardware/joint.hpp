@@ -32,7 +32,7 @@ enum class CommandInterfaceType {
   Effort,
 };
 
-struct JointData {
+struct JointInfo {
   std::string name;
   std::string actuator_name;
   CommandInterfaceType command_mode{CommandInterfaceType::None};
@@ -53,17 +53,17 @@ struct JointState {
   double effort{0.0};
 };
 
-class Joint : public HardwareInterface<JointData, JointCommand, JointState> {
+class Joint : public HardwareInterface<JointInfo, JointCommand, JointState> {
  public:
   Joint(const mjModel* model, mjData* data);
   ~Joint() override = default;
 
-  bool init(const JointData& data) override;
+  bool init(const JointInfo& data) override;
   bool reset() override;
   bool write(const JointCommand& command) override;
   bool read(JointState& state) override;
 
-  const JointData& data() const { return data_; }
+  const JointInfo& data() const { return data_; }
   JointType joint_type() const { return joint_type_; }
   ActuatorType actuator_type() const { return actuator_type_; }
   const std::string& last_error() const override { return last_error_; }
@@ -86,7 +86,7 @@ class Joint : public HardwareInterface<JointData, JointCommand, JointState> {
   ActuatorType actuator_type_{ActuatorType::Unknown};
   CommandInterfaceType command_mode_{CommandInterfaceType::None};
 
-  JointData data_;
+  JointInfo data_;
   JointCommand command_;
   JointState state_;
   std::string last_error_;

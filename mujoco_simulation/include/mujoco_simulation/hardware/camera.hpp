@@ -13,7 +13,7 @@
 
 namespace mujoco_simulation {
 
-struct CameraData {
+struct CameraSpec {
   std::string name;
   std::string camera_name;
 
@@ -59,12 +59,12 @@ struct CameraState {
   CameraInfo camera_info;
 };
 
-class Camera : public HardwareInterface<CameraData, CameraCommand, CameraState> {
+class Camera : public HardwareInterface<CameraSpec, CameraCommand, CameraState> {
  public:
   Camera(const mjModel* model, mjData* data, mjvScene* scene, mjrContext* render_context);
   ~Camera() override = default;
 
-  bool init(const CameraData& data) override;
+  bool init(const CameraSpec& data) override;
   bool reset() override;
   bool write(const CameraCommand&) override;
   bool read(CameraState& state) override;
@@ -76,7 +76,7 @@ class Camera : public HardwareInterface<CameraData, CameraCommand, CameraState> 
   mjvScene* scene_{nullptr};
   mjrContext* render_context_{nullptr};
 
-  CameraData data_;
+  CameraSpec data_;
   int camera_id_{-1};
 
   mjvCamera mj_camera_{};

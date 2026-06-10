@@ -4,8 +4,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from mujoco_ros2_bridge.robocasa.exceptions import RoboCasaSceneConfigError
-from mujoco_ros2_bridge.robocasa.scene_config import config_from_mapping
+from mujoco_simulation.robocasa.exceptions import RoboCasaSceneConfigError
+from mujoco_simulation.robocasa.scene_config import config_from_mapping
 
 
 class SceneConfigTest(unittest.TestCase):

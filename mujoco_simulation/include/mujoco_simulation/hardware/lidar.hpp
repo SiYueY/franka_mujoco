@@ -9,7 +9,7 @@
 
 namespace mujoco_simulation {
 
-struct LidarData {
+struct LidarInfo {
   std::string name;
   std::string frame_name;
   std::string sensor_prefix;
@@ -24,6 +24,7 @@ struct LidarCommand {};
 
 // https://github.com/ros2/common_interfaces/blob/humble/sensor_msgs/msg/LaserScan.msg
 struct LaserScan {
+  std::string frame_id;
   double angle_min{0.0};
   double angle_max{0.0};
   double angle_increment{0.0};
@@ -52,17 +53,17 @@ struct LidarState {
   // PointCloud point_cloud;
 };
 
-class Lidar : public HardwareInterface<LidarData, LidarCommand, LidarState> {
+class Lidar : public HardwareInterface<LidarInfo, LidarCommand, LidarState> {
  public:
   Lidar(const mjModel* model, mjData* data);
   ~Lidar() override = default;
 
-  bool init(const LidarData& data) override;
+  bool init(const LidarInfo& data) override;
   bool reset() override;
   bool write(const LidarCommand& command) override;
   bool read(LidarState& state) override;
 
-  const LidarData& data() const { return data_; }
+  const LidarInfo& data() const { return data_; }
   const std::string& last_error() const override { return last_error_; }
 
  private:
@@ -71,9 +72,10 @@ class Lidar : public HardwareInterface<LidarData, LidarCommand, LidarState> {
   const mjModel* model_{nullptr};
   mjData* mj_data_{nullptr};
 
-  LidarData data_;
+  LidarInfo data_;
   LidarState state_;
   std::vector<int> sensor_addresses_;
+  double last_read_time_{0.0};
   std::string last_error_;
 };
 

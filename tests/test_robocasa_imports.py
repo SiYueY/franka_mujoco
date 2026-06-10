@@ -7,7 +7,7 @@ import unittest
 
 class RoboCasaImportsTest(unittest.TestCase):
     def test_package_imports(self) -> None:
-        import mujoco_ros2_bridge.robocasa as robocasa
+        import mujoco_simulation.robocasa as robocasa
 
         for name in (
             "GeneratedScene",
@@ -39,11 +39,10 @@ class RoboCasaImportsTest(unittest.TestCase):
         with self.assertRaises(ModuleNotFoundError):
             __import__("franka_mujoco.robocasa")
 
-    def test_old_robot_mujoco_import_path_is_removed(self) -> None:
+    def test_old_mujoco_ros2_bridge_import_path_is_removed(self) -> None:
         source_root = (
             Path(__file__).parents[1]
-            / "mujoco_ros2_bridge"
-            / "mujoco_ros2_bridge"
+            / "mujoco_simulation"
             / "robocasa"
         )
 
@@ -57,8 +56,7 @@ class RoboCasaImportsTest(unittest.TestCase):
     def test_old_public_type_names_are_removed(self) -> None:
         source_root = (
             Path(__file__).parents[1]
-            / "mujoco_ros2_bridge"
-            / "mujoco_ros2_bridge"
+            / "mujoco_simulation"
             / "robocasa"
         )
         old_names = (

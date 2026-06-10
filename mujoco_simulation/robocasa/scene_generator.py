@@ -5,16 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-
-from mujoco_ros2_bridge.robocasa.exceptions import (
+from .exceptions import (
     RoboCasaDependencyError,
     RoboCasaIntegrationError,
     RoboCasaSceneGenerationError,
 )
-from mujoco_ros2_bridge.robocasa.mjcf_adapter import adapt_mjcf
-from mujoco_ros2_bridge.robocasa.scene_config import SceneConfig
-from mujoco_ros2_bridge.robocasa.scene_data import (
+from .mjcf_adapter import adapt_mjcf
+from .scene_config import SceneConfig
+from .scene_data import (
     GeneratedScene,
     ObjectPlacement,
     SceneMetadata,
@@ -244,6 +242,8 @@ class SceneGenerator:
         if pos is None or ori is None:
             return None
 
+        np = _import_numpy()
+
         pos_array = np.asarray(pos, dtype=float)
         ori_array = np.asarray(ori, dtype=float)
 
@@ -288,6 +288,7 @@ class SceneGenerator:
 def _as_float_tuple(value: Any, *, expected_len: int) -> tuple[float, ...]:
     """Convert an array-like value to a fixed-length tuple of floats."""
 
+    np = _import_numpy()
     array = np.asarray(value, dtype=float).reshape(-1)
     if array.shape[0] != expected_len:
         raise RoboCasaSceneGenerationError(
@@ -297,9 +298,10 @@ def _as_float_tuple(value: Any, *, expected_len: int) -> tuple[float, ...]:
     return tuple(float(x) for x in array)
 
 
-def _euler_xyz_to_quat_wxyz(euler_xyz: np.ndarray) -> np.ndarray:
+def _euler_xyz_to_quat_wxyz(euler_xyz: Any) -> Any:
     """Convert XYZ Euler angles to a MuJoCo ``wxyz`` quaternion."""
 
+    np = _import_numpy()
     try:
         from scipy.spatial.transform import Rotation
     except ImportError as exc:
@@ -313,3 +315,17 @@ def _euler_xyz_to_quat_wxyz(euler_xyz: np.ndarray) -> np.ndarray:
         [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]],
         dtype=float,
     )
+
+
+def _import_numpy() -> Any:
+    """Import numpy lazily so package import stays lightweight."""
+
+    try:
+        import numpy as np
+    except ImportError as exc:
+        raise RoboCasaDependencyError(
+            "numpy is required for RoboCasa scene generation. "
+            "Install it with your project Python dependencies."
+        ) from exc
+
+    return np
